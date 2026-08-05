@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-spawnlog"
+version = "0.1.0"
+description = "Inspect Codex session subagent spawn records from local rollout files"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Yuli Wang" }]
+dependencies = []
+
+[project.scripts]
+codex-spawns = "codex_spawnlog.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["codex_spawnlog*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
