@@ -21,7 +21,7 @@ fn renders_title_identity_status_and_non_color_cues() {
         next_cursor: None,
         approximate_total: Some(1),
     }));
-    let backend = TestBackend::new(100, 18);
+    let backend = TestBackend::new(150, 18);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| render(frame, &app)).unwrap();
     let output = terminal
@@ -33,5 +33,54 @@ fn renders_title_identity_status_and_non_color_cues() {
         .collect::<String>();
     assert!(output.contains("Profiler redesign"));
     assert!(output.contains("root-123"));
-    assert!(output.contains("[incomplete]"));
+    assert!(output.contains("partial"));
+    assert!(output.contains("Title"));
+    assert!(output.contains("Updated↓"));
+    assert!(output.contains("Agents"));
+    assert!(output.contains("Depth"));
+    assert!(output.contains("State"));
+    assert!(output.contains("Profile"));
+    assert!(output.contains("Selected conversation"));
+    assert!(output.contains("cwd: /repo"));
+    assert!(output.contains("PgUp/PgDn"));
+}
+
+#[test]
+fn narrow_table_keeps_title_frozen_and_cues_horizontal_overflow() {
+    let mut app = App::new(Preferences {
+        color: false,
+        ..Preferences::default()
+    });
+    app.update(Event::ConversationsLoaded(Page {
+        items: vec![ConversationItem {
+            id: "019ff3ff-2e7e-7550-8ed5-8678372c750f".into(),
+            title: "Human readable conversation".into(),
+            cwd: "/repo".into(),
+            last_activity_at: "2026-08-13T14:32:00Z".into(),
+            archived: true,
+            agent_count: 12,
+            max_depth: 3,
+            profile_complete: true,
+        }],
+        next_cursor: None,
+        approximate_total: Some(588),
+    }));
+    app.update(Event::SetViewport {
+        width: 70,
+        height: 4,
+    });
+    app.update(Event::ScrollRightPage);
+    let backend = TestBackend::new(75, 18);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let output = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(output.contains("Human readable conversation"));
+    assert!(output.contains("◀"));
+    assert!(output.contains("Rows 1–1 of ~588"));
 }
