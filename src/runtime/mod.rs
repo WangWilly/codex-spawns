@@ -1231,6 +1231,12 @@ pub(crate) fn refresh_batch(
         app_metadata_refreshed: false,
         app_metadata_diagnostic: None,
         preserve_profile_evidence: false,
+        profiled_session_ids: scan
+            .root_conversations
+            .iter()
+            .map(|root| root.id.clone())
+            .chain(scan.agent_sessions.iter().map(|agent| agent.id.clone()))
+            .collect(),
         reject_reason: None,
     })
 }

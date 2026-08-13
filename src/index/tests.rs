@@ -285,6 +285,7 @@ fn changed_source_delta_retains_unchanged_descendant_usage_and_coverage() {
                 conversations: vec![delta],
                 agents: vec![token_agent("root", "root", 150)],
                 preserve_profile_evidence: true,
+                profiled_session_ids: vec!["root".into()],
                 app_metadata_diagnostic: Some("App metadata unavailable: fixture".into()),
                 ..Default::default()
             },
@@ -325,6 +326,42 @@ fn changed_source_delta_retains_unchanged_descendant_usage_and_coverage() {
             .unwrap()
             .tokens,
         child_agent.tokens
+    );
+
+    let mut missing = conversation("root", "3");
+    missing.tokens.total_sessions = 1;
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![missing],
+                agents: vec![AgentRecord {
+                    tokens: ProfileFact::unknown(),
+                    ..token_agent("root", "root", 0)
+                }],
+                preserve_profile_evidence: true,
+                profiled_session_ids: vec!["root".into()],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    let profile = index.profile("root").unwrap().unwrap();
+    assert_eq!(
+        profile
+            .conversation
+            .tokens
+            .usage
+            .value
+            .unwrap()
+            .total_tokens,
+        200
+    );
+    assert_eq!(
+        (
+            profile.conversation.tokens.covered_sessions,
+            profile.conversation.tokens.total_sessions
+        ),
+        (1, 2)
     );
 }
 

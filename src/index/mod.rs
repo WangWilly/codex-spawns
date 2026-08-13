@@ -245,6 +245,8 @@ pub struct RefreshBatch {
     pub app_metadata_diagnostic: Option<String>,
     /// Merge a changed-source delta with indexed session/token evidence.
     pub preserve_profile_evidence: bool,
+    /// Actual rollout session IDs present in this delta (spawn attempts excluded).
+    pub profiled_session_ids: Vec<String>,
     /// Testable failure injection at the public transaction boundary.
     pub reject_reason: Option<String>,
 }
@@ -741,7 +743,8 @@ fn apply_batch<F: FnMut(RefreshEvent)>(
     for incoming in &batch.conversations {
         let merged;
         let c = if batch.preserve_profile_evidence {
-            merged = merge_conversation_delta(tx, incoming, &batch.agents)?;
+            merged =
+                merge_conversation_delta(tx, incoming, &batch.agents, &batch.profiled_session_ids)?;
             &merged
         } else {
             incoming
@@ -829,6 +832,7 @@ fn merge_conversation_delta(
     tx: &Transaction<'_>,
     incoming: &ConversationRecord,
     incoming_agents: &[AgentRecord],
+    profiled_session_ids: &[String],
 ) -> Result<ConversationRecord, IndexError> {
     let prior = tx
         .query_row(
@@ -860,7 +864,7 @@ fn merge_conversation_delta(
     merged.max_depth = prior.max_depth.max(incoming.max_depth);
     let incoming_ids = incoming_agents
         .iter()
-        .filter(|agent| agent.root_id == incoming.id && agent.tokens.value.is_some())
+        .filter(|agent| agent.root_id == incoming.id && profiled_session_ids.contains(&agent.id))
         .map(|agent| agent.id.as_str())
         .collect::<Vec<_>>();
     let mut replaced_sessions = 0usize;
@@ -874,8 +878,10 @@ fn merge_conversation_delta(
             .optional()?
             .flatten()
             .and_then(|json| serde_json::from_str::<ProfileFact<TokenUsage>>(&json).ok());
-        if let Some(old) = old {
+        if existing_agent_ids.contains(id) {
             replaced_sessions += 1;
+        }
+        if let Some(old) = old {
             if let Some(usage) = old.value {
                 replaced_covered += 1;
                 replaced_total = replaced_total.saturating_add(usage.total_tokens);
@@ -903,6 +909,9 @@ fn merge_conversation_delta(
         new_usage.total_tokens = new_usage.total_tokens.saturating_add(retained);
     } else {
         merged.tokens.usage = prior.tokens.usage;
+        if let Some(usage) = merged.tokens.usage.value.as_mut() {
+            usage.total_tokens = usage.total_tokens.saturating_sub(replaced_total);
+        }
     }
     if !batch_like_app_value(&incoming.project) {
         merged.project = prior.project;
