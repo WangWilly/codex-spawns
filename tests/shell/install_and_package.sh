@@ -123,6 +123,23 @@ PATH="$fake_bin" FAKE_UNAME_S=Darwin FAKE_UNAME_M=arm64 \
   /bin/sh "$repo_root/install.sh"
 assert_contains "$curl_log" 'https://github.com/WangWilly/codex-spawns/releases/latest/download/codex-spawns-aarch64-apple-darwin.tar.gz'
 
+# The remaining supported OS/architecture pairs map to their exact target triples.
+for mapping in 'Darwin x86_64 x86_64-apple-darwin' 'Linux aarch64 aarch64-unknown-linux-musl'; do
+  set -- $mapping
+  mapped_os=$1
+  mapped_arch=$2
+  mapped_target=$3
+  mapped_archive="codex-spawns-$mapped_target.tar.gz"
+  cp "$archive" "$out/$mapped_archive"
+  (cd "$out" && $checksum_tool "$mapped_archive" >SHA256SUMS)
+  : >"$curl_log"
+  PATH="$fake_bin" FAKE_UNAME_S="$mapped_os" FAKE_UNAME_M="$mapped_arch" \
+    FAKE_RELEASE_DIR="$out" FAKE_CURL_LOG="$curl_log" \
+    CODEX_SPAWNS_INSTALL_DIR="$tmp_root/$mapped_target-install" \
+    /bin/sh "$repo_root/install.sh"
+  assert_contains "$curl_log" "https://github.com/WangWilly/codex-spawns/releases/latest/download/$mapped_archive"
+done
+
 # A checksum mismatch must not install anything.
 printf '%064d  %s\n' 0 codex-spawns-x86_64-unknown-linux-musl.tar.gz >"$out/SHA256SUMS"
 if PATH="$fake_bin" FAKE_UNAME_S=Linux FAKE_UNAME_M=x86_64 \
