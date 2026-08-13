@@ -223,14 +223,12 @@ impl ProfileIndex {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA)?;
         // These additions deliberately remain compatible with indexes created by v1.
-        let _ = conn.execute(
-            "ALTER TABLE conversations ADD COLUMN conversation_state TEXT NOT NULL DEFAULT 'active'",
-            [],
-        );
-        let _ = conn.execute(
-            "ALTER TABLE conversations ADD COLUMN profile_quality TEXT NOT NULL DEFAULT 'partial'",
-            [],
-        );
+        ensure_column(
+            &conn,
+            "conversation_state",
+            "TEXT NOT NULL DEFAULT 'active'",
+        )?;
+        ensure_column(&conn, "profile_quality", "TEXT NOT NULL DEFAULT 'partial'")?;
         conn.execute(
             "INSERT OR IGNORE INTO index_metadata(key,value) VALUES('projection_version','0')",
             [],
@@ -363,6 +361,18 @@ impl ProfileIndex {
             current: current.parse().unwrap_or_default(),
             required: REQUIRED_PROJECTION_VERSION,
         })
+    }
+
+    pub fn current_projection_version(&self) -> Result<u32, IndexError> {
+        Ok(self.projection_status()?.current)
+    }
+
+    pub const fn required_projection_version() -> u32 {
+        REQUIRED_PROJECTION_VERSION
+    }
+
+    pub fn needs_reprojection(&self) -> Result<bool, IndexError> {
+        Ok(self.projection_status()?.needs_reprojection())
     }
 
     /// Atomically installs a reprojected batch and records its projection version.
@@ -595,6 +605,22 @@ fn max_generation(conn: &Connection) -> Result<i64, rusqlite::Error> {
         [],
         |r| r.get(0),
     )
+}
+
+fn ensure_column(conn: &Connection, name: &str, declaration: &str) -> Result<(), IndexError> {
+    let mut statement = conn.prepare("PRAGMA table_info(conversations)")?;
+    let exists = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|column| column == name);
+    if !exists {
+        conn.execute(
+            &format!("ALTER TABLE conversations ADD COLUMN {name} {declaration}"),
+            [],
+        )?;
+    }
+    Ok(())
 }
 fn row_to_conversation(r: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationRecord> {
     Ok(ConversationRecord {
