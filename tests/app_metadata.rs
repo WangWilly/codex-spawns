@@ -77,6 +77,14 @@ fn rollout_usage_is_effective_while_app_disagreement_and_title_evidence_are_pres
     assert_eq!(usage.value.as_ref().unwrap().total_tokens, 10);
     assert_eq!(usage.confidence, FactConfidence::Conflicting);
     assert_eq!(usage.conflicting_values[0].total_tokens, 11);
+    let aggregate = &result.conversation_tokens["root"].usage;
+    assert_eq!(aggregate.value.as_ref().unwrap().total_tokens, 10);
+    assert_eq!(aggregate.confidence, FactConfidence::Conflicting);
+    assert_eq!(aggregate.conflicting_values[0].total_tokens, 11);
+    assert!(aggregate
+        .provenance
+        .iter()
+        .any(|source| matches!(source, codex_spawns::SourceRef::StateDatabase { .. })));
     assert_eq!(
         result.session_tokens["fallback"]
             .value

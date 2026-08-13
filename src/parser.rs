@@ -445,30 +445,37 @@ fn aggregate_conversation_tokens(result: &mut ScanResult) {
             }
             cursor += 1;
         }
-        let values = session_ids
+        let facts = session_ids
             .iter()
-            .filter_map(|id| result.session_tokens.get(id)?.value.as_ref())
+            .filter_map(|id| result.session_tokens.get(id))
             .collect::<Vec<_>>();
-        let covered = values.len();
-        let usage = if values.is_empty() {
+        let covered = facts.iter().filter(|fact| fact.value.is_some()).count();
+        let effective_values = facts
+            .iter()
+            .filter_map(|fact| fact.value.as_ref())
+            .collect::<Vec<_>>();
+        let usage = if effective_values.is_empty() {
             ProfileFact::unknown()
         } else {
-            let sum = |pick: fn(&TokenUsage) -> Option<u64>| {
-                values
-                    .iter()
-                    .map(|usage| pick(usage))
-                    .collect::<Option<Vec<_>>>()
-                    .map(|v| v.into_iter().sum())
-            };
+            let effective = aggregate_token_usage(&effective_values);
+            let mut conflicting_values = Vec::new();
+            for fact in &facts {
+                let Some(current) = fact.value.as_ref() else {
+                    continue;
+                };
+                for conflict in &fact.conflicting_values {
+                    let mut alternative = effective_values.clone();
+                    if let Some(position) = alternative.iter().position(|usage| *usage == current) {
+                        alternative[position] = conflict;
+                    }
+                    let alternative = aggregate_token_usage(&alternative);
+                    if alternative != effective && !conflicting_values.contains(&alternative) {
+                        conflicting_values.push(alternative);
+                    }
+                }
+            }
             ProfileFact {
-                value: Some(TokenUsage {
-                    input_tokens: sum(|u| u.input_tokens),
-                    cached_input_tokens: sum(|u| u.cached_input_tokens),
-                    output_tokens: sum(|u| u.output_tokens),
-                    reasoning_output_tokens: sum(|u| u.reasoning_output_tokens),
-                    total_tokens: values.iter().map(|usage| usage.total_tokens).sum(),
-                    model_context_window: None,
-                }),
+                value: Some(effective),
                 confidence: if session_ids
                     .iter()
                     .filter_map(|id| result.session_tokens.get(id))
@@ -483,7 +490,7 @@ fn aggregate_conversation_tokens(result: &mut ScanResult) {
                     .filter_map(|id| result.session_tokens.get(id))
                     .flat_map(|fact| fact.provenance.clone())
                     .collect(),
-                conflicting_values: vec![],
+                conflicting_values,
             }
         };
         result.conversation_tokens.insert(
@@ -494,6 +501,24 @@ fn aggregate_conversation_tokens(result: &mut ScanResult) {
                 total_sessions: session_ids.len(),
             },
         );
+    }
+}
+
+fn aggregate_token_usage(values: &[&TokenUsage]) -> TokenUsage {
+    let sum = |pick: fn(&TokenUsage) -> Option<u64>| {
+        values
+            .iter()
+            .map(|usage| pick(usage))
+            .collect::<Option<Vec<_>>>()
+            .map(|values| values.into_iter().sum())
+    };
+    TokenUsage {
+        input_tokens: sum(|usage| usage.input_tokens),
+        cached_input_tokens: sum(|usage| usage.cached_input_tokens),
+        output_tokens: sum(|usage| usage.output_tokens),
+        reasoning_output_tokens: sum(|usage| usage.reasoning_output_tokens),
+        total_tokens: values.iter().map(|usage| usage.total_tokens).sum(),
+        model_context_window: None,
     }
 }
 
