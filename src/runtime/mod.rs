@@ -19,8 +19,19 @@ use std::{
     io::Read,
     io::{self, IsTerminal},
     path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
+    thread,
     time::Duration,
 };
+
+enum WorkerEvent {
+    Progress {
+        scanned: usize,
+        total: Option<usize>,
+    },
+    Ready(codex_spawns::index::BrowsePage),
+    Failed(String),
+}
 
 fn index_path(common: &Common) -> PathBuf {
     common
@@ -48,8 +59,17 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let mut app = App::new(Preferences::default());
     app.update(Event::ConversationsLoaded(to_page(page)));
+    // Stale-first: the cached page above is immediately usable while source
+    // discovery and parsing happen on a worker thread.
+    let mut refresh = Some(start_refresh(common.clone(), path.clone(), false));
     let mut terminal = TerminalGuard::enter().map_err(|e| e.to_string())?;
     loop {
+        if let Some(receiver) = refresh.as_ref() {
+            match drain_worker(receiver, &mut app)? {
+                true => refresh = None,
+                false => {}
+            }
+        }
         terminal
             .terminal
             .draw(|f| interactive::render(f, &app))
@@ -94,9 +114,88 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                                 });
                             }
                         }
+                        Command::Refresh if refresh.is_none() => {
+                            refresh = Some(start_refresh(common.clone(), path.clone(), false));
+                        }
+                        Command::Rebuild if refresh.is_none() => {
+                            refresh = Some(start_refresh(common.clone(), path.clone(), true));
+                        }
                         _ => {}
                     }
                 }
+            }
+        }
+    }
+}
+
+fn start_refresh(common: Common, path: PathBuf, rebuild: bool) -> Receiver<WorkerEvent> {
+    let (sender, receiver) = mpsc::sync_channel(16);
+    thread::spawn(move || {
+        if let Err(error) = refresh_worker(&common, path, rebuild, &sender) {
+            let _ = sender.send(WorkerEvent::Failed(error));
+        }
+    });
+    receiver
+}
+
+fn refresh_worker(
+    common: &Common,
+    path: PathBuf,
+    rebuild: bool,
+    sender: &SyncSender<WorkerEvent>,
+) -> Result<(), String> {
+    sender
+        .send(WorkerEvent::Progress {
+            scanned: 0,
+            total: None,
+        })
+        .map_err(|_| "interactive refresh was cancelled".to_string())?;
+    let (files, dbs) = crate::cli::discover(common)?;
+    let total = files.len() + dbs.len();
+    sender
+        .send(WorkerEvent::Progress {
+            scanned: 0,
+            total: Some(total),
+        })
+        .map_err(|_| "interactive refresh was cancelled".to_string())?;
+    let scan = codex_spawns::scan_sources(&files, &dbs).map_err(|e| e.to_string())?;
+    sender
+        .send(WorkerEvent::Progress {
+            scanned: total,
+            total: Some(total),
+        })
+        .map_err(|_| "interactive refresh was cancelled".to_string())?;
+    let batch = refresh_batch(&scan, &files, &dbs)?;
+    let mut index = ProfileIndex::open(IndexOptions { path }).map_err(|e| e.to_string())?;
+    if rebuild {
+        index.reset().map_err(|e| e.to_string())?;
+    }
+    index.refresh(batch, |_| {}).map_err(|e| e.to_string())?;
+    let page = index
+        .browse(&ConversationFilter::default(), None, 25)
+        .map_err(|e| e.to_string())?;
+    sender
+        .send(WorkerEvent::Ready(page))
+        .map_err(|_| "interactive refresh was cancelled".to_string())
+}
+
+/// Returns true once this worker has reached a terminal state.
+fn drain_worker(receiver: &Receiver<WorkerEvent>, app: &mut App) -> Result<bool, String> {
+    loop {
+        match receiver.try_recv() {
+            Ok(WorkerEvent::Progress { scanned, total }) => {
+                app.update(Event::RefreshProgress(
+                    codex_spawns::interactive::RefreshProgress { scanned, total },
+                ));
+            }
+            Ok(WorkerEvent::Ready(page)) => {
+                app.update(Event::RefreshReady(to_page(page)));
+                return Ok(true);
+            }
+            Ok(WorkerEvent::Failed(error)) => return Err(error),
+            Err(TryRecvError::Empty) => return Ok(false),
+            Err(TryRecvError::Disconnected) => {
+                return Err("interactive refresh worker stopped unexpectedly".into())
             }
         }
     }
