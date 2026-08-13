@@ -341,10 +341,15 @@ impl App {
             Event::MouseSelect { index } => match self.screen {
                 Screen::Conversations => {
                     self.conversation_selection =
-                        min(index, self.visible_conversations().len().saturating_sub(1))
+                        min(index, self.visible_conversations().len().saturating_sub(1));
+                    Self::follow_selection(
+                        self.conversation_selection,
+                        &mut self.conversation_viewport,
+                    );
                 }
                 Screen::Conversation | Screen::AgentDetail => {
-                    self.agent_selection = min(index, self.agents.len().saturating_sub(1))
+                    self.agent_selection = min(index, self.agents.len().saturating_sub(1));
+                    Self::follow_selection(self.agent_selection, &mut self.tree_viewport);
                 }
                 Screen::Help => {}
             },
@@ -581,11 +586,15 @@ impl App {
                     vec![]
                 }
             }
-            Screen::Conversation | Screen::AgentDetail => {
+            Screen::Conversation if self.focus == Focus::Tree => {
                 if self.agent_selection + 1 < self.agents.len() {
                     self.agent_selection += 1;
                     Self::follow_selection(self.agent_selection, &mut self.tree_viewport);
                 }
+                vec![]
+            }
+            Screen::Conversation | Screen::AgentDetail => {
+                self.detail_viewport.row = self.detail_viewport.row.saturating_add(1);
                 vec![]
             }
             Screen::Help => vec![],
@@ -597,8 +606,11 @@ impl App {
             Screen::Conversations => {
                 self.conversation_selection = self.conversation_selection.saturating_sub(1)
             }
-            Screen::Conversation | Screen::AgentDetail => {
+            Screen::Conversation if self.focus == Focus::Tree => {
                 self.agent_selection = self.agent_selection.saturating_sub(1)
+            }
+            Screen::Conversation | Screen::AgentDetail => {
+                self.detail_viewport.row = self.detail_viewport.row.saturating_sub(1)
             }
             Screen::Help => {}
         }
@@ -606,9 +618,10 @@ impl App {
             Screen::Conversations => {
                 Self::follow_selection(self.conversation_selection, &mut self.conversation_viewport)
             }
-            Screen::Conversation | Screen::AgentDetail => {
+            Screen::Conversation if self.focus == Focus::Tree => {
                 Self::follow_selection(self.agent_selection, &mut self.tree_viewport)
             }
+            Screen::AgentDetail | Screen::Conversation => {}
             Screen::Help => {}
         }
     }

@@ -111,6 +111,32 @@ fn keyboard_sort_overlay_selects_a_field_and_toggles_its_direction() {
 }
 
 #[test]
+fn detail_pane_scroll_is_independent_from_agent_tree_selection() {
+    let mut app = App::new(Preferences::default());
+    app.update(Event::ConversationsLoaded(Page {
+        items: vec![conversation("root", "Root")],
+        next_cursor: None,
+        approximate_total: None,
+    }));
+    app.update(Event::Enter);
+    app.update(Event::AgentsLoaded {
+        conversation_id: "root".into(),
+        agents: vec![
+            agent("one", None, 0, AgentStatus::Complete),
+            agent("two", Some("one"), 1, AgentStatus::Complete),
+        ],
+    });
+    app.update(Event::Tab);
+    app.update(Event::Down);
+    assert_eq!(app.selected_agent_index(), 0);
+    assert_eq!(app.detail_viewport().row, 1);
+    app.update(Event::BackTab);
+    app.update(Event::Down);
+    assert_eq!(app.selected_agent_index(), 1);
+    assert_eq!(app.detail_viewport().row, 1);
+}
+
+#[test]
 fn detail_and_source_actions_are_not_dropped() {
     let mut app = App::new(Preferences::default());
     app.update(Event::ConversationsLoaded(Page {
