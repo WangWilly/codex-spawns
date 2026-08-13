@@ -67,6 +67,33 @@ fn selected_index_path(common: &Common) -> PathBuf {
     }
 }
 
+fn preferences_path(common: &Common) -> PathBuf {
+    selected_index_path(common)
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("preferences.conf")
+}
+
+fn load_preferences(common: &Common) -> Preferences {
+    if common.no_cache {
+        return Preferences::default();
+    }
+    fs::read_to_string(preferences_path(common))
+        .map(|value| Preferences::from_toml_like(&value))
+        .unwrap_or_default()
+}
+
+fn save_preferences(common: &Common, preferences: &Preferences) -> Result<(), String> {
+    if common.no_cache {
+        return Ok(());
+    }
+    let path = preferences_path(common);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(path, preferences.to_toml_like()).map_err(|error| error.to_string())
+}
+
 fn cleanup_ephemeral_index(common: &Common, path: &Path) {
     if common.no_cache {
         for suffix in ["", "-wal", "-shm"] {
@@ -91,7 +118,7 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
             BrowseOrder::default(),
         )
         .map_err(|e| e.to_string())?;
-    let mut app = App::new(Preferences::default());
+    let mut app = App::new(load_preferences(common));
     app.update(Event::ConversationsLoaded(to_page(page)));
     // Stale-first: the cached page above is immediately usable while source
     // discovery and parsing happen on a worker thread.
@@ -119,6 +146,7 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                 for command in app.update(input) {
                     match command {
                         Command::Quit => {
+                            save_preferences(common, app.preferences())?;
                             drop(index);
                             cleanup_ephemeral_index(common, &path);
                             return Ok(());
@@ -525,7 +553,7 @@ fn to_page(
             })
             .collect(),
         next_cursor: p.next_cursor.map(|c| c.encode()),
-        approximate_total: None,
+        approximate_total: usize::try_from(p.approximate_total).ok(),
     }
 }
 
@@ -1052,6 +1080,36 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(index_path(&common), PathBuf::from("/tmp/custom.sqlite"));
+    }
+
+    #[test]
+    fn preferences_are_loaded_and_saved_beside_the_profile_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let common = Common {
+            index_path: Some(dir.path().join("index.sqlite")),
+            ..Default::default()
+        };
+        let preferences = Preferences {
+            title_width: 72,
+            page_size: 40,
+            ..Preferences::default()
+        };
+        save_preferences(&common, &preferences).unwrap();
+        let loaded = load_preferences(&common);
+        assert_eq!(loaded.title_width, 72);
+        assert_eq!(loaded.page_size, 40);
+        assert!(!loaded.to_toml_like().contains("conversation"));
+    }
+
+    #[test]
+    fn browse_total_is_forwarded_to_the_interactive_footer_model() {
+        let page = to_page(codex_spawns::index::BrowsePage {
+            conversations: vec![],
+            next_cursor: None,
+            semantics: Default::default(),
+            approximate_total: 588,
+        });
+        assert_eq!(page.approximate_total, Some(588));
     }
 
     #[test]
