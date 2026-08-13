@@ -189,7 +189,10 @@ fn agent_table_is_full_width_by_default_with_fixed_headers_and_tree_glyphs() {
             tokens: TokenDisplay::LowerBound(12_400),
         }],
     });
-    let backend = TestBackend::new(120, 18);
+    // The fixed schema is wider than a compact terminal; use a wide backend
+    // here to assert every header while the narrow-layout test covers frozen
+    // Title plus horizontal scrolling separately.
+    let backend = TestBackend::new(200, 18);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| render(frame, &app)).unwrap();
     let output = terminal

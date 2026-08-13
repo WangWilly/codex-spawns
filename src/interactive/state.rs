@@ -717,8 +717,13 @@ impl App {
                 }
             }
             Screen::Conversation => {
-                if let Some(agent) = self.selected_agent().cloned() {
+                let selected_index = self.open_agent_index();
+                if let Some(agent) = self.agents.get(selected_index).cloned() {
                     self.push_navigation();
+                    self.agent_selection = selected_index;
+                    self.detail_viewport.row = 0;
+                    self.detail_viewport.column = 0;
+                    self.detail_viewport.cursor_column = 0;
                     self.screen = Screen::AgentDetail;
                     if agent.detail_loaded {
                         vec![]
@@ -1054,6 +1059,23 @@ impl App {
         self.next_cursor = page.next_cursor;
         self.approximate_total = page.approximate_total;
         self.conversation_selection = 0;
+    }
+
+    fn open_agent_index(&self) -> usize {
+        let selected = self.agent_selection;
+        let Some(root_id) = self.selected_root_id.as_deref() else {
+            return selected;
+        };
+        let synthetic_root = self
+            .agents
+            .get(selected)
+            .map(|agent| agent.id == root_id && agent.status == AgentStatus::StateOnly)
+            .unwrap_or(false);
+        if synthetic_root && selected == 0 && self.agents.len() > 1 {
+            1
+        } else {
+            selected
+        }
     }
 
     fn normalize_agents(&self, mut agents: Vec<AgentItem>) -> Vec<AgentItem> {
