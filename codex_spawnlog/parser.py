@@ -890,7 +890,10 @@ def _stable_id(*parts: str | None) -> str:
 
 
 def _expand_path(value: str | Path) -> Path:
-    return Path(value).expanduser().resolve(strict=False)
+    # Keep the caller-visible spelling of macOS' /var -> /private/var alias.
+    # Source discovery should make paths absolute without resolving symlinks;
+    # the SQLite read-only URI canonicalizes separately when it opens a DB.
+    return Path(value).expanduser().absolute()
 
 
 def _unique_paths(paths: Iterable[Path]) -> list[Path]:

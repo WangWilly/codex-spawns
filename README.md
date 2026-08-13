@@ -1,6 +1,6 @@
 # codex-spawns
 
-`codex-spawns` 是一個零依賴的 CLI，用來掃描 Codex 本機 rollout JSONL，整理所有 session 的 subagent spawn 紀錄。
+`codex-spawns` 是一個 Rust 單一執行檔，提供 Interactive TUI 與相容的 command mode，用來分析 Codex root conversations 與完整的 spawned-agent tree。
 
 它會合併三種證據來源：
 
@@ -10,21 +10,29 @@
 
 因此即使父 rollout 沒有保存完整的 function-call output，或只剩子 rollout，仍能產生可檢視的紀錄。大型 JSONL 會逐行讀取，不會整個載入記憶體。
 
-## 安裝
+## 建置
 
 在這個專案目錄執行：
 
 ```bash
-python3 -m pip install -e .
+cargo build --release
+./target/release/codex-spawns --help
 ```
 
-也可以不安裝，直接使用：
+release profile 使用 LTO、strip 與 size optimization；SQLite bundled 於 binary，不依賴系統 `libsqlite3`。
+
+## Interactive Mode
+
+在 TTY 中無參數執行會立即顯示本機 Profile Index 的舊 snapshot，再以背景 thread 增量 refresh：
 
 ```bash
-python3 -m codex_spawnlog --help
+codex-spawns
+codex-spawns interactive
 ```
 
-安裝後的命令名稱是 `codex-spawns`。
+首頁以 root conversation 為單位，固定顯示標題、ID、cwd、最近活動、agent 數量與最大深度。`Enter` 開啟完整 agent tree；detail 僅在選取時讀取。列表使用 cursor pagination，每批預設 25 筆。背景 refresh 完成後會標示新 snapshot 可用，按 `Enter` 套用，避免瀏覽中的項目跳動。
+
+主要按鍵：`j/k` 或方向鍵移動、`Enter` 開啟或套用更新、`Esc` 返回、`/` 搜尋、`f` 篩選、`r` refresh、`R` 兩次確認 rebuild、`Tab` 切換 pane、`?` 說明、`q` 離開。
 
 ## 基本用法
 
@@ -34,6 +42,10 @@ python3 -m codex_spawnlog --help
 codex-spawns list
 codex-spawns sessions
 codex-spawns doctor
+codex-spawns index status
+codex-spawns index refresh
+codex-spawns index rebuild
+codex-spawns index prune --before 1723420800
 ```
 
 指定不同的 Codex home 或 rollout 根目錄：
@@ -89,7 +101,16 @@ codex-spawns list --format csv > subagents.csv
 ## 開發
 
 ```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo bench --bench index_query
+```
+
+Python 版本暫時保留為相容性 reference implementation：
+
+```bash
 python3 -m unittest discover -s tests -v
 ```
 
-工具不會修改 rollout JSONL 或 state database。
+Profile Index 位於 `$CODEX_HOME/cache/codex-spawns/index.sqlite`。它只保存 display metadata 與 excerpt；完整 task message、raw evidence 與 transcript 不建立全文索引。rollout JSONL 與 Codex state database 永遠唯讀；`rebuild`／`prune` 只修改可重建的 Profile Index。

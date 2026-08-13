@@ -6,8 +6,7 @@ use std::time::{Duration, Instant};
 /// A dependency-free release-gate smoke benchmark. Run with
 /// `cargo bench --bench index_query`; the deliberately generous bound catches
 /// accidental full scans while remaining stable on shared CI machines.
-#[test]
-fn first_page_from_ten_thousand_records_completes_within_release_gate() {
+fn main() {
     let directory = tempfile::tempdir().unwrap();
     let mut index = ProfileIndex::open(IndexOptions {
         path: directory.path().join("index.sqlite"),
@@ -44,5 +43,7 @@ fn first_page_from_ten_thousand_records_completes_within_release_gate() {
         .browse(&ConversationFilter::default(), None, 25)
         .unwrap();
     assert_eq!(page.conversations.len(), 25);
-    assert!(started.elapsed() < Duration::from_millis(100));
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_millis(100));
+    println!("first page (10,000 conversations): {elapsed:?}");
 }

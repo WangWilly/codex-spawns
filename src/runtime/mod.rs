@@ -65,9 +65,8 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
     let mut terminal = TerminalGuard::enter().map_err(|e| e.to_string())?;
     loop {
         if let Some(receiver) = refresh.as_ref() {
-            match drain_worker(receiver, &mut app)? {
-                true => refresh = None,
-                false => {}
+            if drain_worker(receiver, &mut app)? {
+                refresh = None;
             }
         }
         terminal
