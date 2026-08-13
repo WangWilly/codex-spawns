@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const SNAPSHOT_RETENTION_GENERATIONS: i64 = 64;
 pub use crate::projection::PROJECTION_VERSION as REQUIRED_PROJECTION_VERSION;
 
@@ -241,6 +241,12 @@ impl ProfileIndex {
             [],
         )?;
         conn.execute(
+            "INSERT OR IGNORE INTO agent_versions(id,root_id,parent_id,agent_path,task_name,task_excerpt,role,nickname,model,effort,status,depth,evidence_complete,indexed_generation)
+             SELECT a.id,a.root_id,a.parent_id,a.agent_path,a.task_name,a.task_excerpt,a.role,a.nickname,a.model,a.effort,a.status,a.depth,a.evidence_complete,c.indexed_generation
+             FROM agents a JOIN conversations c ON c.id=a.root_id",
+            [],
+        )?;
+        conn.execute(
             "INSERT OR IGNORE INTO index_metadata(key,value) VALUES('projection_version','0')",
             [],
         )?;
@@ -339,7 +345,11 @@ impl ProfileIndex {
                   CAST(({key_expr}) AS TEXT),({null_expr})
            FROM snapshot WHERE (?2 IS NULL OR archived=?2) AND (?3 IS NULL OR cwd=?3) AND (?4 IS NULL OR model=?4) AND (?5 IS NULL OR status=?5)
              AND (?6 IS NULL OR title LIKE '%'||?6||'%' OR id LIKE '%'||?6||'%' OR cwd LIKE '%'||?6||'%'
-               OR EXISTS (SELECT 1 FROM agents a WHERE a.root_id=snapshot.id AND
+               OR EXISTS (SELECT 1 FROM agent_versions a JOIN (
+                    SELECT id,MAX(indexed_generation) AS generation FROM agent_versions
+                    WHERE indexed_generation <= ?1 GROUP BY id
+                  ) latest_agent ON latest_agent.id=a.id AND latest_agent.generation=a.indexed_generation
+                  WHERE a.root_id=snapshot.id AND
                  (a.id LIKE '%'||?6||'%' OR a.task_name LIKE '%'||?6||'%' OR a.role LIKE '%'||?6||'%'
                   OR a.nickname LIKE '%'||?6||'%' OR a.model LIKE '%'||?6||'%' OR a.status LIKE '%'||?6||'%')))
              {cursor_predicate}
@@ -607,6 +617,7 @@ impl ProfileIndex {
     pub fn reset(&mut self) -> Result<(), IndexError> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM agents", [])?;
+        tx.execute("DELETE FROM agent_versions", [])?;
         tx.execute("DELETE FROM conversations", [])?;
         tx.execute("DELETE FROM conversation_versions", [])?;
         tx.execute("DELETE FROM sources", [])?;
@@ -628,7 +639,7 @@ fn apply_batch<F: FnMut(RefreshEvent)>(
     emit: &mut F,
 ) -> Result<(), IndexError> {
     let generation: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(indexed_generation),0)+1 FROM conversation_versions",
+        "SELECT MAX(value)+1 FROM (SELECT COALESCE(MAX(indexed_generation),0) value FROM conversation_versions UNION ALL SELECT COALESCE(MAX(indexed_generation),0) FROM agent_versions)",
         [],
         |r| r.get(0),
     )?;
@@ -666,7 +677,17 @@ fn apply_batch<F: FnMut(RefreshEvent)>(
              ON CONFLICT(id) DO UPDATE SET root_id=excluded.root_id,parent_id=excluded.parent_id,agent_path=excluded.agent_path,task_name=excluded.task_name,task_excerpt=excluded.task_excerpt,role=excluded.role,nickname=excluded.nickname,model=excluded.model,effort=excluded.effort,status=excluded.status,depth=excluded.depth,evidence_complete=excluded.evidence_complete",
             params![agent.id,agent.root_id,agent.parent_id,agent.agent_path,agent.task_name,agent.task_excerpt,agent.role,agent.nickname,agent.model,agent.effort,agent.status,agent.depth,agent.evidence_complete],
         )?;
+        tx.execute(
+            "INSERT INTO agent_versions(id,root_id,parent_id,agent_path,task_name,task_excerpt,role,nickname,model,effort,status,depth,evidence_complete,indexed_generation)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            params![agent.id,agent.root_id,agent.parent_id,agent.agent_path,agent.task_name,agent.task_excerpt,agent.role,agent.nickname,agent.model,agent.effort,agent.status,agent.depth,agent.evidence_complete,generation],
+        )?;
     }
+    tx.execute(
+        "DELETE FROM agent_versions WHERE indexed_generation < ?1
+         AND indexed_generation < (SELECT MAX(newer.indexed_generation) FROM agent_versions newer WHERE newer.id=agent_versions.id)",
+        [generation.saturating_sub(SNAPSHOT_RETENTION_GENERATIONS - 1)],
+    )?;
     for s in &batch.sources {
         tx.execute("INSERT INTO sources(logical_id,canonical_path,size,modified_ns,fingerprint,safe_offset,archived,missing,missing_since) VALUES(?1,?2,?3,?4,?5,?6,?7,0,NULL)
           ON CONFLICT(logical_id) DO UPDATE SET canonical_path=excluded.canonical_path,size=excluded.size,modified_ns=excluded.modified_ns,fingerprint=excluded.fingerprint,safe_offset=excluded.safe_offset,archived=excluded.archived,missing=0,missing_since=NULL",
@@ -704,19 +725,16 @@ fn apply_semantics(
 
 fn max_generation(conn: &Connection) -> Result<i64, rusqlite::Error> {
     conn.query_row(
-        "SELECT COALESCE(MAX(indexed_generation),0) FROM conversation_versions",
+        "SELECT MAX(value) FROM (SELECT COALESCE(MAX(indexed_generation),0) value FROM conversation_versions UNION ALL SELECT COALESCE(MAX(indexed_generation),0) FROM agent_versions)",
         [],
         |r| r.get(0),
     )
 }
 
 fn generation_is_retained(conn: &Connection, generation: i64) -> Result<bool, IndexError> {
-    let bounds = conn.query_row(
-        "SELECT COALESCE(MIN(indexed_generation),0),COALESCE(MAX(indexed_generation),0) FROM conversation_versions",
-        [],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-    )?;
-    Ok(generation >= bounds.0 && generation <= bounds.1)
+    let latest = max_generation(conn)?;
+    Ok(generation <= latest
+        && generation >= latest.saturating_sub(SNAPSHOT_RETENTION_GENERATIONS - 1))
 }
 
 fn filter_signature(filter: &ConversationFilter) -> String {
@@ -753,7 +771,10 @@ fn snapshot_total(
       ) latest ON latest.id=cv.id AND latest.generation=cv.indexed_generation
     ) SELECT COUNT(*) FROM snapshot WHERE (?2 IS NULL OR archived=?2) AND (?3 IS NULL OR cwd=?3) AND (?4 IS NULL OR model=?4) AND (?5 IS NULL OR status=?5)
       AND (?6 IS NULL OR title LIKE '%'||?6||'%' OR id LIKE '%'||?6||'%' OR cwd LIKE '%'||?6||'%'
-        OR EXISTS (SELECT 1 FROM agents a WHERE a.root_id=snapshot.id AND (a.id LIKE '%'||?6||'%' OR a.task_name LIKE '%'||?6||'%' OR a.role LIKE '%'||?6||'%' OR a.nickname LIKE '%'||?6||'%' OR a.model LIKE '%'||?6||'%' OR a.status LIKE '%'||?6||'%')))",
+        OR EXISTS (SELECT 1 FROM agent_versions a JOIN (
+          SELECT id,MAX(indexed_generation) AS generation FROM agent_versions WHERE indexed_generation<=?1 GROUP BY id
+        ) latest_agent ON latest_agent.id=a.id AND latest_agent.generation=a.indexed_generation
+        WHERE a.root_id=snapshot.id AND (a.id LIKE '%'||?6||'%' OR a.task_name LIKE '%'||?6||'%' OR a.role LIKE '%'||?6||'%' OR a.nickname LIKE '%'||?6||'%' OR a.model LIKE '%'||?6||'%' OR a.status LIKE '%'||?6||'%')))",
       params![generation, archived, filter.cwd, filter.model, filter.status, filter.query], |row| row.get(0))?)
 }
 
@@ -848,6 +869,8 @@ CREATE TABLE IF NOT EXISTS conversation_versions(id TEXT NOT NULL,title TEXT NOT
 CREATE INDEX IF NOT EXISTS conversation_versions_snapshot ON conversation_versions(indexed_generation,id);
 CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY,root_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,parent_id TEXT,agent_path TEXT,task_name TEXT,task_excerpt TEXT,role TEXT,nickname TEXT,model TEXT,effort TEXT,status TEXT NOT NULL,depth INTEGER NOT NULL,evidence_complete INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS agents_by_root ON agents(root_id,depth,id);
+CREATE TABLE IF NOT EXISTS agent_versions(id TEXT NOT NULL,root_id TEXT NOT NULL,parent_id TEXT,agent_path TEXT,task_name TEXT,task_excerpt TEXT,role TEXT,nickname TEXT,model TEXT,effort TEXT,status TEXT NOT NULL,depth INTEGER NOT NULL,evidence_complete INTEGER NOT NULL,indexed_generation INTEGER NOT NULL,PRIMARY KEY(id,indexed_generation));
+CREATE INDEX IF NOT EXISTS agent_versions_snapshot ON agent_versions(indexed_generation,id,root_id);
 CREATE TABLE IF NOT EXISTS sources(logical_id TEXT PRIMARY KEY,canonical_path TEXT NOT NULL UNIQUE,size INTEGER NOT NULL,modified_ns INTEGER NOT NULL,fingerprint TEXT NOT NULL,safe_offset INTEGER NOT NULL,archived INTEGER NOT NULL,missing INTEGER NOT NULL DEFAULT 0,missing_since INTEGER);
 CREATE TABLE IF NOT EXISTS index_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 "#;

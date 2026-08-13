@@ -468,6 +468,74 @@ fn search_matches_agent_metadata_outside_conversation_columns() {
 }
 
 #[test]
+fn agent_metadata_search_membership_is_stable_for_an_open_snapshot() {
+    let (_dir, mut index) = open();
+    let make_agent = |id: &str, root_id: &str, task_name: &str| AgentRecord {
+        id: id.into(),
+        root_id: root_id.into(),
+        parent_id: Some(root_id.into()),
+        agent_path: Some(format!("/root/{id}")),
+        task_name: Some(task_name.into()),
+        task_excerpt: None,
+        role: Some("explorer".into()),
+        nickname: None,
+        model: Some("gpt-test".into()),
+        effort: Some("high".into()),
+        status: "complete".into(),
+        depth: 1,
+        evidence_complete: true,
+    };
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![
+                    conversation("a", "1"),
+                    conversation("b", "2"),
+                    conversation("c", "3"),
+                ],
+                agents: vec![
+                    make_agent("agent-a", "a", "needle"),
+                    make_agent("agent-b", "b", "needle"),
+                    make_agent("agent-c", "c", "needle"),
+                ],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    let filter = ConversationFilter {
+        query: Some("needle".into()),
+        ..Default::default()
+    };
+    let first = index.browse(&filter, None, 1).unwrap();
+    assert_eq!(ids(first.clone()), vec!["c"]);
+    assert_eq!(first.approximate_total, 3);
+
+    index
+        .refresh(
+            RefreshBatch {
+                agents: vec![
+                    make_agent("agent-b", "b", "renamed"),
+                    make_agent("agent-new", "c", "needle"),
+                ],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+    let second = index
+        .browse(&filter, first.next_cursor.as_ref(), 2)
+        .unwrap();
+    assert_eq!(ids(second.clone()), vec!["b", "a"]);
+    assert_eq!(second.approximate_total, 3);
+
+    let fresh = index.browse(&filter, None, 25).unwrap();
+    assert_eq!(ids(fresh.clone()), vec!["c", "a"]);
+    assert_eq!(fresh.approximate_total, 2);
+}
+
+#[test]
 fn source_identity_supports_append_move_and_replacement() {
     let (_dir, mut index) = open();
     let source = SourceRecord {
