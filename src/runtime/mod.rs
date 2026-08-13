@@ -331,7 +331,13 @@ fn refresh_worker(
             total: Some(total),
         })
         .map_err(|_| "interactive refresh was cancelled".to_string())?;
-    let scan = codex_spawns::scan_sources(&files, &dbs).map_err(|e| e.to_string())?;
+    let mut index = ProfileIndex::open(IndexOptions { path }).map_err(|e| e.to_string())?;
+    if rebuild {
+        index.reset().map_err(|e| e.to_string())?;
+    }
+    let (changed_files, changed_dbs) = changed_sources(&index, &files, &dbs)?;
+    let scan =
+        codex_spawns::scan_sources(&changed_files, &changed_dbs).map_err(|e| e.to_string())?;
     sender
         .send(WorkerEvent::Progress {
             scanned: total,
@@ -339,10 +345,6 @@ fn refresh_worker(
         })
         .map_err(|_| "interactive refresh was cancelled".to_string())?;
     let batch = refresh_batch(&scan, &files, &dbs)?;
-    let mut index = ProfileIndex::open(IndexOptions { path }).map_err(|e| e.to_string())?;
-    if rebuild {
-        index.reset().map_err(|e| e.to_string())?;
-    }
     index.refresh(batch, |_| {}).map_err(|e| e.to_string())?;
     let page = index
         .browse(&ConversationFilter::default(), None, 25)
@@ -350,6 +352,28 @@ fn refresh_worker(
     sender
         .send(WorkerEvent::Ready(page))
         .map_err(|_| "interactive refresh was cancelled".to_string())
+}
+
+fn changed_sources(
+    index: &ProfileIndex,
+    files: &[PathBuf],
+    dbs: &[PathBuf],
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
+    fn changed(index: &ProfileIndex, paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+        let mut result = Vec::new();
+        for path in paths {
+            let candidate = source_record(path, is_archived(path))?;
+            if !matches!(
+                index.source_change(&candidate).map_err(|e| e.to_string())?,
+                codex_spawns::index::SourceChange::Unchanged
+                    | codex_spawns::index::SourceChange::Moved { .. }
+            ) {
+                result.push(path.clone());
+            }
+        }
+        Ok(result)
+    }
+    Ok((changed(index, files)?, changed(index, dbs)?))
 }
 
 /// Returns true once this worker has reached a terminal state.
@@ -460,13 +484,15 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
         IndexAction::Refresh | IndexAction::Rebuild => {
             let rebuild = matches!(action, IndexAction::Rebuild);
             let (files, dbs) = crate::cli::discover(common)?;
-            let scan = codex_spawns::scan_sources(&files, &dbs).map_err(|e| e.to_string())?;
-            let batch = refresh_batch(&scan, &files, &dbs)?;
             let mut index = ProfileIndex::open(IndexOptions { path: path.clone() })
                 .map_err(|e| e.to_string())?;
             if rebuild {
                 index.reset().map_err(|e| e.to_string())?;
             }
+            let (changed_files, changed_dbs) = changed_sources(&index, &files, &dbs)?;
+            let scan = codex_spawns::scan_sources(&changed_files, &changed_dbs)
+                .map_err(|e| e.to_string())?;
+            let batch = refresh_batch(&scan, &files, &dbs)?;
             index.refresh(batch, |_| {}).map_err(|e| e.to_string())?;
             let stats = index.stats().map_err(|e| e.to_string())?;
             println!(
@@ -794,5 +820,43 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(index_path(&common), PathBuf::from("/tmp/custom.sqlite"));
+    }
+
+    #[test]
+    fn refresh_skips_unchanged_sources_and_revisits_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout.jsonl");
+        fs::write(&rollout, "one\n").unwrap();
+        let mut index = ProfileIndex::open(IndexOptions {
+            path: dir.path().join("index.sqlite"),
+        })
+        .unwrap();
+        let source = source_record(&rollout, false).unwrap();
+        index
+            .refresh(
+                RefreshBatch {
+                    sources: vec![source],
+                    ..Default::default()
+                },
+                |_| {},
+            )
+            .unwrap();
+        assert!(changed_sources(&index, std::slice::from_ref(&rollout), &[])
+            .unwrap()
+            .0
+            .is_empty());
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(b"two\n")
+            .unwrap();
+        assert_eq!(
+            changed_sources(&index, std::slice::from_ref(&rollout), &[])
+                .unwrap()
+                .0,
+            vec![rollout]
+        );
     }
 }
