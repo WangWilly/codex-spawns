@@ -199,6 +199,12 @@ pub fn agent_columns(title_width: usize) -> Vec<ColumnDescriptor> {
     .collect()
 }
 
+/// Computes the frozen Title width while reserving room for at least one
+/// horizontally scrollable field and the table overflow cues.
+pub fn table_title_width(preferred: usize, area_width: usize) -> usize {
+    preferred.min(area_width.saturating_sub(22).max(1))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentDetail {
     pub agent_id: String,

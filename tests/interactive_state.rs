@@ -1,7 +1,7 @@
 use codex_spawns::interactive::{
-    AgentDetail, AgentItem, AgentStatus, App, Command, ConversationItem, Event, Filter, Focus,
-    Page, Preferences, ProjectDisplay, ProjectFilter, RefreshProgress, Screen, Sort, SortDirection,
-    TokenDisplay,
+    agent_columns, root_columns, table_title_width, AgentDetail, AgentItem, AgentStatus, App,
+    Command, ConversationItem, Event, Filter, Focus, Page, Preferences, ProjectDisplay,
+    ProjectFilter, RefreshProgress, Screen, Sort, SortDirection, TokenDisplay,
 };
 
 fn conversation(id: &str, title: &str) -> ConversationItem {
@@ -635,4 +635,12 @@ fn agent_title_width_changes_only_inside_agent_table_and_tab_does_not_focus_hidd
     assert_eq!(app.preferences().agent_title_width, agent_width + 4);
     app.update(Event::Tab);
     assert_eq!(app.focus(), Focus::Tree);
+}
+
+#[test]
+fn shared_table_layout_reserves_a_scrollable_column_on_narrow_terminals() {
+    assert_eq!(table_title_width(48, 70), 48);
+    assert_eq!(table_title_width(48, 40), 18);
+    assert_eq!(root_columns(table_title_width(48, 40))[0].width, 18);
+    assert!(agent_columns(table_title_width(48, 40))[1].width > 0);
 }

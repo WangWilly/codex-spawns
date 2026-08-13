@@ -49,7 +49,7 @@ fn render_conversations(frame: &mut Frame<'_>, app: &App, area: Rect) {
         SortDirection::Ascending => "↑",
         SortDirection::Descending => "↓",
     };
-    let title_width = frozen_title_width(app.root_title_width(), area.width as usize);
+    let title_width = super::table_title_width(app.root_title_width(), area.width as usize);
     let columns = root_columns(title_width);
     let headers = columns
         .iter()
@@ -176,7 +176,7 @@ fn render_conversation(frame: &mut Frame<'_>, app: &App, area: Rect, detail_scre
 fn render_tree(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let viewport = app.tree_viewport();
     let height = area.height.saturating_sub(2) as usize;
-    let title_width = frozen_title_width(app.agent_title_width(), area.width as usize);
+    let title_width = super::table_title_width(app.agent_title_width(), area.width as usize);
     let columns = agent_columns(title_width);
     let headers = columns
         .iter()
@@ -422,11 +422,6 @@ fn agent_cell(agent: &super::AgentItem, key: ColumnKey) -> String {
     }
 }
 
-fn frozen_title_width(preferred: usize, area_width: usize) -> usize {
-    // Keep a meaningful moving viewport even on a narrow terminal: reserve
-    // enough cells for one compact non-title field plus the scroll cues.
-    preferred.min(area_width.saturating_sub(22).max(1))
-}
 fn fit(value: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
