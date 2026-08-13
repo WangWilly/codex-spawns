@@ -538,7 +538,7 @@ fn horizontal_cursor_reveals_one_complete_column_at_table_edges() {
             app.conversation_focused_column(),
             app.conversation_viewport().column
         ),
-        (1, 0)
+        (1, 21)
     );
     app.update(Event::ScrollRight);
     assert_eq!(

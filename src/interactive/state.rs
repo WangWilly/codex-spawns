@@ -1316,7 +1316,7 @@ fn visible_column_range(offset: usize, capacity: usize, widths: &[usize]) -> (us
     let edge = offset.saturating_add(capacity.max(1));
     let mut last = first;
     for (index, start) in starts.iter().enumerate().skip(first + 1) {
-        if *start < edge {
+        if start.saturating_add(widths[index]) <= edge {
             last = index;
         } else {
             break;
