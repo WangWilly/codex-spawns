@@ -151,8 +151,31 @@ fn refresh_keeps_snapshot_until_user_applies_completed_update() {
     }));
     assert!(app.has_pending_snapshot());
     assert_eq!(app.conversations()[0].id, "old");
-    app.update(Event::ApplySnapshot);
+    app.update(Event::Enter);
     assert_eq!(app.conversations()[0].id, "new");
+}
+
+#[test]
+fn load_more_is_not_requested_twice_while_the_page_is_in_flight() {
+    let mut app = App::new(Preferences::default());
+    app.update(Event::ConversationsLoaded(Page {
+        items: vec![conversation("one", "One")],
+        next_cursor: Some("next".into()),
+        approximate_total: Some(2),
+    }));
+    assert_eq!(
+        app.update(Event::Down),
+        vec![Command::LoadMore {
+            cursor: "next".into()
+        }]
+    );
+    assert_eq!(app.update(Event::Down), vec![]);
+    app.update(Event::MoreConversationsLoaded(Page {
+        items: vec![conversation("two", "Two")],
+        next_cursor: None,
+        approximate_total: Some(2),
+    }));
+    assert_eq!(app.conversations().len(), 2);
 }
 
 #[test]

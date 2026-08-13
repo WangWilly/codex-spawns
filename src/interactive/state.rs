@@ -175,6 +175,7 @@ pub struct App {
     conversations: Vec<ConversationItem>,
     conversation_selection: usize,
     next_cursor: Option<String>,
+    loading_more: bool,
     approximate_total: Option<usize>,
     selected_root_id: Option<String>,
     agents: Vec<AgentItem>,
@@ -198,6 +199,7 @@ impl App {
             conversations: vec![],
             conversation_selection: 0,
             next_cursor: None,
+            loading_more: false,
             approximate_total: None,
             selected_root_id: None,
             agents: vec![],
@@ -222,6 +224,7 @@ impl App {
                 self.conversations.extend(page.items);
                 self.next_cursor = page.next_cursor;
                 self.approximate_total = page.approximate_total;
+                self.loading_more = false;
             }
             Event::AgentsLoaded {
                 conversation_id,
@@ -348,6 +351,10 @@ impl App {
             self.search_editing = false;
             return vec![];
         }
+        if let Some(page) = self.pending_snapshot.take() {
+            self.replace_page(page);
+            return vec![];
+        }
         match self.screen {
             Screen::Conversations => {
                 if let Some(item) = self.selected_conversation().cloned() {
@@ -401,7 +408,11 @@ impl App {
                 if self.conversation_selection + 1 < len {
                     self.conversation_selection += 1;
                     vec![]
-                } else if let Some(cursor) = self.next_cursor.clone() {
+                } else if !self.loading_more {
+                    let Some(cursor) = self.next_cursor.clone() else {
+                        return vec![];
+                    };
+                    self.loading_more = true;
                     vec![Command::LoadMore { cursor }]
                 } else {
                     vec![]
