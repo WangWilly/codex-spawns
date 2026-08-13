@@ -1,45 +1,99 @@
 # codex-spawns
 
-`codex-spawns` 是一個 Rust 單一執行檔，提供 Interactive TUI 與相容的 command mode，用來分析 Codex root conversations 與完整的 spawned-agent tree。
+Explore a Codex root conversation and every agent it spawned from one fast,
+local terminal interface.
 
-它會合併三種證據來源：
-
-- 父 session 的 `spawn_agent` / `collaboration.spawn_agent` function call
-- 子 session 的 `session_meta.source.subagent.thread_spawn` metadata
-- 可選的 `state_*.sqlite` 中 `thread_spawn_edges` table（只讀）
-
-因此即使父 rollout 沒有保存完整的 function-call output，或只剩子 rollout，仍能產生可檢視的紀錄。大型 JSONL 會逐行讀取，不會整個載入記憶體。
-
-## 建置
-
-在這個專案目錄執行：
-
-```bash
-cargo build --release
-./target/release/codex-spawns --help
+```text
+Root conversations                 Agent profile
+────────────────────────────────   ─────────────────────────────
+▶ Improve spawn profiling          model      gpt-5.6-sol
+  Release portable binaries        status     completed
+  Diagnose index latency           children   3
+                                    duration   2m 18s
 ```
 
-release profile 使用 LTO、strip 與 size optimization；SQLite bundled 於 binary，不依賴系統 `libsqlite3`。
+`codex-spawns` combines rollout events, child-session metadata, and optional
+read-only Codex state databases. It keeps the root conversation title visible,
+shows the complete agent tree, and loads detailed evidence only when requested.
 
-## Interactive Mode
+## Features
 
-在 TTY 中無參數執行會立即顯示本機 Profile Index 的舊 snapshot，再以背景 thread 增量 refresh：
+- Interactive root-conversation browser with cursor pagination.
+- Complete nested agent trees, including requested, failed, state-only, and
+  unresolved spawn attempts.
+- Requested and effective model, reasoning effort, role, status, timing, tool,
+  token, and provenance details when the source records them.
+- A local incremental SQLite Profile Index with stale-while-refresh behavior.
+- Scriptable table, JSON, JSONL, and CSV output.
+- One self-contained Rust binary with bundled SQLite.
 
-```bash
+## Install
+
+Install the latest release to `~/.local/bin`:
+
+```sh
+curl -fsSL https://github.com/WangWilly/codex-spawns/releases/latest/download/install.sh | sh
+```
+
+The installer selects the macOS or Linux binary for your architecture and
+refuses to install unless its SHA-256 checksum verifies. It never uses `sudo`
+or changes your shell profile. Ensure `~/.local/bin` is on your `PATH`.
+
+To install a pinned release or choose another destination:
+
+```sh
+curl -fsSL https://github.com/WangWilly/codex-spawns/releases/download/v0.2.0/install.sh \
+  | CODEX_SPAWNS_VERSION=v0.2.0 CODEX_SPAWNS_INSTALL_DIR="$HOME/bin" sh
+```
+
+See the [installation manual](docs/manual/installing.md) for manual downloads,
+script inspection, supported targets, and macOS Gatekeeper notes.
+
+## Quick start
+
+Run with no arguments in a terminal to open Interactive Mode:
+
+```sh
 codex-spawns
-codex-spawns interactive
 ```
 
-首頁以 root conversation 為單位，固定顯示標題、ID、cwd、最近活動、agent 數量與最大深度。`Enter` 開啟完整 agent tree；detail 僅在選取時讀取。列表使用 cursor pagination，每批預設 25 筆。背景 refresh 完成後會標示新 snapshot 可用，按 `Enter` 套用，避免瀏覽中的項目跳動。
+The initial screen lists Root Conversations by recent activity. Open one to
+inspect its full Agent Tree and the selected agent's profile. Existing index
+data appears immediately while changed rollouts refresh in the background.
 
-主要按鍵：`j/k` 或方向鍵移動、`Enter` 開啟或套用更新、`Esc` 返回、`/` 搜尋、`f` 篩選、`r` refresh、`R` 兩次確認 rebuild、`Tab` 切換 pane、`?` 說明、`q` 離開。
+The default data source is `$CODEX_HOME`, or `~/.codex` when that variable is
+unset. Active and archived sessions are included unless disabled.
 
-## 基本用法
+## Interactive controls
 
-預設掃描 `$CODEX_HOME/sessions` 或 `~/.codex/sessions`，也會掃描存在的 `archived_sessions` 與 `state_*.sqlite`：
+| Key | Action |
+| --- | --- |
+| `↑` / `↓`, `j` / `k` | Move selection |
+| `Enter` | Open a conversation or agent; apply an available snapshot |
+| `Esc`, `Backspace` | Return to the previous view |
+| `/` | Search indexed metadata |
+| `f` | Change filters |
+| `r` | Incrementally refresh the index |
+| `R` | Confirm and rebuild the index |
+| `e` | Open raw evidence on demand |
+| `m` | Show the complete task message after the privacy prompt |
+| `Tab`, `Shift+Tab` | Switch between tree and detail panes |
+| `?` | Show help |
+| `q` | Quit |
 
-```bash
-codex-spawns list
+Mouse input is optional. Status is never communicated by color alone, and
+`NO_COLOR` is respected.
+
+## Command Mode
+
+Explicit commands remain available for scripts and direct inspection. With no
+TTY, running `codex-spawns` without a command falls back to `list`.
+
+```sh
+codex-spawns list --format json --limit 25
+codex-spawns list --cwd ~/src/my-repo --model gpt-5.6-sol
+codex-spawns show 1 --evidence
+codex-spawns show 019f --format json --include-message
 codex-spawns sessions
 codex-spawns doctor
 codex-spawns index status
@@ -48,69 +102,52 @@ codex-spawns index rebuild
 codex-spawns index prune --before 1723420800
 ```
 
-指定不同的 Codex home 或 rollout 根目錄：
+Point the scanner at another Codex home, one or more session trees, or explicit
+rollout files:
 
-```bash
-codex-spawns --codex-home ~/.codex list
-codex-spawns --sessions-dir ~/other-codex/sessions list
-codex-spawns --sessions-dir ~/other-codex/sessions --sessions-dir ~/.codex/sessions list
+```sh
+codex-spawns --codex-home /path/to/.codex list
+codex-spawns --sessions-dir /path/to/sessions list
 codex-spawns --file /path/to/rollout.jsonl list
 ```
 
-依工作環境、父 session、子 session、模型或角色篩選：
+Run `codex-spawns --help` or `codex-spawns <command> --help` for the complete
+option reference.
 
-```bash
-codex-spawns list --cwd ~/src/my-repo
-codex-spawns list --parent 019e...
-codex-spawns list --child 019f...
-codex-spawns list --model gpt-5.5 --role explorer
-codex-spawns list --since 2026-08-01T00:00:00Z --status spawned
+## Privacy and local data
+
+All inspection and indexing happens locally. `codex-spawns` does not send
+telemetry or upload rollout data. The Profile Index stores display metadata and
+message excerpts, not complete prompts, task messages, raw evidence, or
+transcripts. Complete content is read from its source only when requested.
+
+Rollout JSONL and Codex state databases are always read-only. `index rebuild`
+and `index prune` modify only the disposable Profile Index. Machine-readable
+exports omit complete messages unless `--include-message` is explicit; review
+exports before sharing because rollout metadata can still contain private paths
+and project details.
+
+## Build from source
+
+Install the pinned Rust toolchain described by `rust-toolchain.toml`, then run:
+
+```sh
+cargo build --release
+./target/release/codex-spawns --version
 ```
 
-查看特定紀錄。列表第一欄是可直接傳給 `show` 的 1-based index；也可以使用完整或前綴的 spawn/child thread ID：
+SQLite is bundled, so the resulting binary does not require a system
+`libsqlite3`.
 
-```bash
-codex-spawns show 1 --include-message --evidence
-codex-spawns show 019f... --format json --include-message
-```
+Development checks:
 
-## 輸出與腳本化
-
-預設是人類可讀的 table。另支援 JSON、JSONL、CSV：
-
-```bash
-codex-spawns list --format json > subagents.json
-codex-spawns list --format jsonl > subagents.jsonl
-codex-spawns list --format csv > subagents.csv
-```
-
-為避免把 prompt 或工作內容意外印到終端，列表預設只顯示 `message_excerpt`；需要完整 task message 時才加上 `--include-message`。rollout 可能包含 prompt、程式碼、路徑與其他私人內容。
-
-## 重要欄位
-
-- `parent_thread_id` / `child_thread_id`: 父子 session 關係
-- `requested_model` / `requested_effort`: 父 session 的 spawn 參數
-- `effective_model` / `effective_effort`: 子 rollout 的 `turn_context` 實際記錄
-- `agent_role` / `agent_nickname` / `agent_path`: 子 session metadata
-- `fork_turns`: V2 fork 模式；舊版 `fork_context` 會轉成 `all` 或 `none`
-- `source`: `rollout`、`child-metadata`、`state-db` 或合併來源
-- `state_status`: SQLite edge 的狀態（若有）
-
-`effective_model` 應優先於父 session 當時選取的模型；工具會保留 requested/effective 兩組欄位，方便檢查模型路由是否如預期。
-
-## 開發
-
-```bash
+```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test
+cargo test --workspace
 cargo bench --bench index_query
 ```
 
-Python 版本暫時保留為相容性 reference implementation：
-
-```bash
-python3 -m unittest discover -s tests -v
-```
-
-Profile Index 位於 `$CODEX_HOME/cache/codex-spawns/index.sqlite`。它只保存 display metadata 與 excerpt；完整 task message、raw evidence 與 transcript 不建立全文索引。rollout JSONL 與 Codex state database 永遠唯讀；`rebuild`／`prune` 只修改可重建的 Profile Index。
+Maintainers should use the [release manual](docs/manual/releasing.md) and the
+[toolchain upgrade manual](docs/manual/upgrading-toolchain.md). Architecture
+decisions are recorded in [`docs/adr`](docs/adr/).
