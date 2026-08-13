@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 /// The confidence attached to every profiling value.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +19,40 @@ pub enum SourceRef {
     Rollout { path: PathBuf, line: Option<u64> },
     StateDatabase { path: PathBuf, rowid: Option<i64> },
     Derived { rule: String },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub reasoning_output_tokens: Option<u64>,
+    pub total_tokens: u64,
+    pub model_context_window: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsageSummary {
+    pub usage: ProfileFact<TokenUsage>,
+    pub covered_sessions: usize,
+    pub total_sessions: usize,
+}
+
+impl Default for TokenUsageSummary {
+    fn default() -> Self {
+        Self {
+            usage: ProfileFact::unknown(),
+            covered_sessions: 0,
+            total_sessions: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ProjectAssignment {
+    Assigned { id: String, name: String },
+    Projectless,
 }
 
 /// A value plus its evidence and confidence. Unknown is represented by `None`, never zero.
@@ -147,6 +181,18 @@ pub struct ScanResult {
     pub rollout_files: Vec<PathBuf>,
     pub state_databases: Vec<PathBuf>,
     pub diagnostics: Vec<String>,
+    /// App-authoritative titles keyed by thread ID.
+    #[serde(default)]
+    pub app_titles: HashMap<String, ProfileFact<String>>,
+    /// Current App project assignment keyed by thread ID.
+    #[serde(default)]
+    pub projects: HashMap<String, ProfileFact<ProjectAssignment>>,
+    /// Per-session final cumulative usage (never a sum of usage events).
+    #[serde(default)]
+    pub session_tokens: HashMap<String, ProfileFact<TokenUsage>>,
+    /// Root plus all actual descendant sessions; spawn attempts are not counted.
+    #[serde(default)]
+    pub conversation_tokens: HashMap<String, TokenUsageSummary>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -167,4 +213,33 @@ pub(crate) struct ParsedSpawnCall {
     pub output_line: Option<u64>,
     pub output_error: Option<String>,
     pub path: PathBuf,
+    pub usage: Option<(String, TokenUsage)>,
+}
+
+impl ParsedSpawnCall {
+    pub(crate) fn usage(session: String, usage: TokenUsage, path: PathBuf, line: u64) -> Self {
+        Self {
+            parent_id: None,
+            timestamp: None,
+            line,
+            call_id: None,
+            arguments: Value::Null,
+            child_ids: vec![],
+            output_line: None,
+            output_error: None,
+            path,
+            usage: Some((session, usage)),
+        }
+    }
+    pub(crate) fn usage_evidence(&self) -> Option<(&str, &TokenUsage, SourceRef)> {
+        let (session, usage) = self.usage.as_ref()?;
+        Some((
+            session,
+            usage,
+            SourceRef::Rollout {
+                path: self.path.clone(),
+                line: Some(self.line),
+            },
+        ))
+    }
 }

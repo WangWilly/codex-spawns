@@ -1,3 +1,4 @@
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use serde_json::Value;
 
 /// Required version of persisted profile projections.
@@ -5,7 +6,7 @@ use serde_json::Value;
 ///
 /// The index imports this constant directly so extraction and persistence cannot
 /// silently disagree about which projection is current.
-pub const PROJECTION_VERSION: u32 = 2;
+pub const PROJECTION_VERSION: u32 = 3;
 
 /// Title-specific alias for consumers that expose per-projection diagnostics.
 pub const TITLE_PROJECTION_VERSION: u32 = PROJECTION_VERSION;
@@ -17,6 +18,28 @@ pub fn project_user_message(value: &Value) -> Option<String> {
     let mut candidates = Vec::new();
     collect_text(value, &mut candidates);
     candidates.into_iter().filter_map(sanitize).next()
+}
+
+/// Project CommonMark to semantic, single-line display text.
+pub fn project_plain_text(markdown: &str) -> Option<String> {
+    let mut output = String::new();
+    for event in Parser::new(markdown) {
+        match event {
+            Event::Text(text) | Event::Code(text) => {
+                output.push_str(&text);
+                output.push(' ');
+            }
+            Event::Start(Tag::Image { dest_url, .. }) if output.trim().is_empty() => {
+                let _ = dest_url;
+            }
+            Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item)
+            | Event::SoftBreak
+            | Event::HardBreak => output.push(' '),
+            _ => {}
+        }
+    }
+    let collapsed = output.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!collapsed.is_empty()).then(|| truncate_display_width(&collapsed, 80))
 }
 
 fn collect_text<'a>(value: &'a Value, output: &mut Vec<&'a str>) {
@@ -57,8 +80,7 @@ fn sanitize(input: &str) -> Option<String> {
     } else {
         lines.join(" ")
     };
-    let collapsed = meaningful.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!collapsed.is_empty()).then(|| truncate_display_width(&collapsed, 80))
+    project_plain_text(&meaningful)
 }
 
 fn is_request_heading(line: &str) -> bool {

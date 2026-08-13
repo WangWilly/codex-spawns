@@ -1,5 +1,6 @@
 use codex_spawns::{
-    parse_rollout, project_user_message, PROJECTION_VERSION, TITLE_PROJECTION_VERSION,
+    parse_rollout, project_plain_text, project_user_message, PROJECTION_VERSION,
+    TITLE_PROJECTION_VERSION,
 };
 use serde_json::json;
 use std::path::PathBuf;
@@ -8,6 +9,14 @@ fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/title")
         .join(name)
+}
+
+#[test]
+fn commonmark_projection_retains_semantic_text_and_discards_syntax_and_html() {
+    assert_eq!(
+        project_plain_text("# **Review** [parser](https://example.test) `code()` ![diagram](x) <span>hidden html</span>").as_deref(),
+        Some("Review parser code() diagram hidden html")
+    );
 }
 
 #[test]
@@ -61,7 +70,7 @@ fn extracts_intent_from_structured_content_without_serializing_injected_plugins(
     let parsed = parse_rollout(fixture("plugins_then_intent.jsonl")).unwrap();
     let root = parsed.root.unwrap();
 
-    assert_eq!(TITLE_PROJECTION_VERSION, 2);
+    assert_eq!(TITLE_PROJECTION_VERSION, 3);
     assert_eq!(PROJECTION_VERSION, TITLE_PROJECTION_VERSION);
     assert_eq!(
         root.first_user_message.value.as_deref(),

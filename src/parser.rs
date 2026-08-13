@@ -1,5 +1,6 @@
+use crate::app_metadata::{app_total, AppMetadataSnapshot};
 use crate::domain::*;
-use crate::projection::project_user_message;
+use crate::projection::{project_plain_text, project_user_message};
 use serde_json::{Map, Value};
 use std::{
     collections::HashMap,
@@ -40,6 +41,7 @@ struct Meta {
     title: Option<(String, u64)>,
     first_user_message: Option<(String, u64)>,
     last_event_at: Option<(String, u64)>,
+    token_usage: Option<(TokenUsage, u64)>,
     subagent: bool,
     events: u64,
     errors: u64,
@@ -108,6 +110,9 @@ pub fn parse_rollout(path: impl AsRef<Path>) -> Result<ParsedRollout, ParseError
             continue;
         }
         meta.events += 1;
+        if let Some(usage) = parse_token_usage(payload) {
+            meta.token_usage = Some((usage, line));
+        }
         if let Some(timestamp) = text(event_obj.get("timestamp")) {
             meta.last_event_at = Some((timestamp, line));
         }
@@ -163,6 +168,7 @@ pub fn parse_rollout(path: impl AsRef<Path>) -> Result<ParsedRollout, ParseError
                     output_line: None,
                     output_error: None,
                     path: path.into(),
+                    usage: None,
                 });
             }
         } else if matches!(
@@ -197,6 +203,7 @@ pub fn parse_rollout(path: impl AsRef<Path>) -> Result<ParsedRollout, ParseError
         });
     };
     if meta.subagent {
+        let session_id = id.clone();
         let agent = AgentSession {
             id,
             parent_thread_id: fact(meta.parent, path),
@@ -216,9 +223,15 @@ pub fn parse_rollout(path: impl AsRef<Path>) -> Result<ParsedRollout, ParseError
         Ok(ParsedRollout {
             root: None,
             agent: Some(agent),
-            calls,
+            calls: {
+                if let Some((usage, line)) = meta.token_usage {
+                    calls.push(ParsedSpawnCall::usage(session_id, usage, path.into(), line));
+                }
+                calls
+            },
         })
     } else {
+        let session_id = id.clone();
         let root = RootConversation {
             id,
             path: path.into(),
@@ -235,7 +248,12 @@ pub fn parse_rollout(path: impl AsRef<Path>) -> Result<ParsedRollout, ParseError
         Ok(ParsedRollout {
             root: Some(root),
             agent: None,
-            calls,
+            calls: {
+                if let Some((usage, line)) = meta.token_usage {
+                    calls.push(ParsedSpawnCall::usage(session_id, usage, path.into(), line));
+                }
+                calls
+            },
         })
     }
 }
@@ -244,6 +262,14 @@ pub fn parse_rollout(path: impl AsRef<Path>) -> Result<ParsedRollout, ParseError
 pub fn scan_sources(
     rollouts: &[PathBuf],
     state_databases: &[PathBuf],
+) -> Result<ScanResult, ParseError> {
+    scan_sources_with_app_metadata(rollouts, state_databases, None)
+}
+
+pub fn scan_sources_with_app_metadata(
+    rollouts: &[PathBuf],
+    state_databases: &[PathBuf],
+    app: Option<&AppMetadataSnapshot>,
 ) -> Result<ScanResult, ParseError> {
     let mut result = ScanResult {
         rollout_files: rollouts.to_vec(),
@@ -268,6 +294,13 @@ pub fn scan_sources(
         .collect();
     for rollout in &parsed {
         for call in &rollout.calls {
+            if let Some((session, usage, src)) = call.usage_evidence() {
+                result.session_tokens.insert(
+                    session.to_owned(),
+                    ProfileFact::observed(usage.clone(), src),
+                );
+                continue;
+            }
             result.spawn_attempts.push(attempt_from_call(
                 call,
                 agents
@@ -299,7 +332,169 @@ pub fn scan_sources(
     for db in state_databases {
         merge_state(db, &mut result)?;
     }
+    apply_app_metadata(&mut result, app);
+    aggregate_conversation_tokens(&mut result);
     Ok(result)
+}
+
+fn parse_token_usage(payload: &Map<String, Value>) -> Option<TokenUsage> {
+    let info = payload.get("info").unwrap_or(&Value::Null);
+    let usage = payload
+        .get("total_token_usage")
+        .or_else(|| info.get("total_token_usage"))?
+        .as_object()?;
+    let total_tokens = usage.get("total_tokens")?.as_u64()?;
+    let number = |name: &str| usage.get(name).and_then(Value::as_u64);
+    Some(TokenUsage {
+        input_tokens: number("input_tokens"),
+        cached_input_tokens: number("cached_input_tokens"),
+        output_tokens: number("output_tokens"),
+        reasoning_output_tokens: number("reasoning_output_tokens"),
+        total_tokens,
+        model_context_window: payload
+            .get("model_context_window")
+            .and_then(Value::as_u64)
+            .or_else(|| info.get("model_context_window").and_then(Value::as_u64))
+            .or_else(|| usage.get("model_context_window").and_then(Value::as_u64)),
+    })
+}
+
+fn apply_app_metadata(result: &mut ScanResult, app: Option<&AppMetadataSnapshot>) {
+    let Some(app) = app else { return };
+    for root in &mut result.root_conversations {
+        if let Some(thread) = app.threads.get(&root.id) {
+            if let Some(title) = &thread.title {
+                let src = SourceRef::StateDatabase {
+                    path: app.thread_catalog_path.clone(),
+                    rowid: thread.rowid,
+                };
+                let mut effective = ProfileFact::observed(title.clone(), src);
+                if let Some(rollout) = root.title.value.clone() {
+                    let rollout_src = root.title.provenance.first().cloned().unwrap_or_else(|| {
+                        SourceRef::Derived {
+                            rule: "rollout-title".into(),
+                        }
+                    });
+                    effective.observe(rollout, rollout_src);
+                }
+                root.title = effective.clone();
+                result.app_titles.insert(root.id.clone(), effective);
+            }
+        }
+        if let Some(project) = app.projects.get(&root.id) {
+            result.projects.insert(
+                root.id.clone(),
+                ProfileFact::observed(
+                    project.clone(),
+                    SourceRef::Derived {
+                        rule: format!("app-global-state:{}", app.global_state_path.display()),
+                    },
+                ),
+            );
+        }
+    }
+    let known_sessions = result
+        .root_conversations
+        .iter()
+        .map(|root| root.id.as_str())
+        .chain(result.agent_sessions.iter().map(|agent| agent.id.as_str()))
+        .collect::<Vec<_>>();
+    for session in known_sessions {
+        let Some(thread) = app.threads.get(session) else {
+            continue;
+        };
+        let Some(total) = thread.tokens_used else {
+            continue;
+        };
+        let src = SourceRef::StateDatabase {
+            path: app.thread_catalog_path.clone(),
+            rowid: thread.rowid,
+        };
+        match result.session_tokens.get_mut(session) {
+            Some(rollout)
+                if rollout
+                    .value
+                    .as_ref()
+                    .is_some_and(|usage| usage.total_tokens == total) =>
+            {
+                rollout.provenance.push(src);
+            }
+            Some(rollout) => rollout.observe(app_total(total), src),
+            None => {
+                result.session_tokens.insert(
+                    session.to_owned(),
+                    ProfileFact::observed(app_total(total), src),
+                );
+            }
+        }
+    }
+}
+
+fn aggregate_conversation_tokens(result: &mut ScanResult) {
+    for root in &result.root_conversations {
+        let mut session_ids = vec![root.id.clone()];
+        let mut cursor = 0;
+        while cursor < session_ids.len() {
+            let parent = session_ids[cursor].clone();
+            for agent in &result.agent_sessions {
+                if agent.parent_thread_id.value.as_deref() == Some(&parent)
+                    && !session_ids.contains(&agent.id)
+                {
+                    session_ids.push(agent.id.clone());
+                }
+            }
+            cursor += 1;
+        }
+        let values = session_ids
+            .iter()
+            .filter_map(|id| result.session_tokens.get(id)?.value.as_ref())
+            .collect::<Vec<_>>();
+        let covered = values.len();
+        let usage = if values.is_empty() {
+            ProfileFact::unknown()
+        } else {
+            let sum = |pick: fn(&TokenUsage) -> Option<u64>| {
+                values
+                    .iter()
+                    .map(|usage| pick(usage))
+                    .collect::<Option<Vec<_>>>()
+                    .map(|v| v.into_iter().sum())
+            };
+            ProfileFact {
+                value: Some(TokenUsage {
+                    input_tokens: sum(|u| u.input_tokens),
+                    cached_input_tokens: sum(|u| u.cached_input_tokens),
+                    output_tokens: sum(|u| u.output_tokens),
+                    reasoning_output_tokens: sum(|u| u.reasoning_output_tokens),
+                    total_tokens: values.iter().map(|usage| usage.total_tokens).sum(),
+                    model_context_window: None,
+                }),
+                confidence: if session_ids
+                    .iter()
+                    .filter_map(|id| result.session_tokens.get(id))
+                    .any(|fact| fact.confidence == FactConfidence::Conflicting)
+                {
+                    FactConfidence::Conflicting
+                } else {
+                    FactConfidence::Derived
+                },
+                provenance: session_ids
+                    .iter()
+                    .filter_map(|id| result.session_tokens.get(id))
+                    .flat_map(|fact| fact.provenance.clone())
+                    .collect(),
+                conflicting_values: vec![],
+            }
+        };
+        result.conversation_tokens.insert(
+            root.id.clone(),
+            TokenUsageSummary {
+                usage,
+                covered_sessions: covered,
+                total_sessions: session_ids.len(),
+            },
+        );
+    }
 }
 
 fn names_match(task_name: Option<&str>, agent_path: Option<&str>) -> bool {
@@ -344,7 +539,9 @@ fn update_session(m: &mut Meta, p: &Map<String, Value>, line: u64) {
         m.cwd = Some((v, line))
     }
     assign_text(&mut m.model, p.get("model"), line);
-    assign_text(&mut m.title, p.get("title"), line);
+    if let Some(title) = text(p.get("title")).and_then(|title| project_plain_text(&title)) {
+        m.title = Some((title, line));
+    }
     assign_text(
         &mut m.effort,
         p.get("effort")
@@ -509,7 +706,11 @@ fn attempt_from_call(c: &ParsedSpawnCall, child: Option<&AgentSession>) -> Spawn
         parent_thread_id: c.parent_id.clone(),
         child_thread_id: child_id,
         task_name: call_fact(c, arg(c, &["task_name", "task", "name"])),
-        message: call_fact(c, arg(c, &["message", "prompt", "instructions"])),
+        message: call_fact(
+            c,
+            arg(c, &["message", "prompt", "instructions"])
+                .and_then(|message| project_plain_text(&message)),
+        ),
         agent_type: call_fact(c, arg(c, &["agent_type", "agent_role", "role"])),
         requested_model: call_fact(c, arg(c, &["model", "effective_model"])),
         requested_effort: call_fact(
