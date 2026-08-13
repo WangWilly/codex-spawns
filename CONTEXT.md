@@ -43,3 +43,7 @@ _Avoid_: Agent, child session
 **Profile Fact**:
 A profiling value paired with its provenance and confidence state: observed, derived, unknown, or conflicting. Missing evidence is never represented as zero, and conflicting sources remain visible rather than being silently overwritten.
 _Avoid_: Metric, inferred value
+
+**Maintainer Manual**:
+Documentation under `docs/manual/` for workflows that require human judgement or intervention, such as preparing and validating a release. The README links to these procedures but does not duplicate them.
+_Avoid_: Runbook scattered across README, release notes

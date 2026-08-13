@@ -1,0 +1,5 @@
+# Build and publish portable release artifacts with GitHub Actions
+
+Use separate least-privilege CI and release workflows. Pull requests and `main` pushes run Rust checks and conditionally build four platform artifacts; a matching `v*` tag builds macOS x86_64/ARM64 and Linux musl x86_64/ARM64 archives, verifies that the tag equals the Cargo version, generates `SHA256SUMS`, and creates a draft GitHub Release for manual approval. Linux artifacts use pinned Zig and `cargo-zigbuild`; all toolchains and third-party actions are pinned for reproducibility.
+
+Each release also contains a version-bound, fail-closed `install.sh`. It detects the supported platform, permits version and repository overrides, downloads the archive and checksums, requires SHA-256 verification, installs without `sudo`, and never edits a shell profile. Artifacts are checksummed but not signed in the first release. Human release validation, including an ARM64 Linux smoke test, lives under `docs/manual/` and remains a required publishing gate.
