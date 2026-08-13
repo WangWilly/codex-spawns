@@ -8,7 +8,8 @@ use codex_spawns::{
     ScanResult, SpawnStatus,
 };
 use crossterm::{
-    event::{self, Event as TerminalEvent, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, Event as TerminalEvent, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind},
+    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -443,6 +444,14 @@ fn map_event(e: TerminalEvent) -> Option<Event> {
             KeyCode::Char(c) => Some(Event::Key(c)),
             _ => None,
         },
+        TerminalEvent::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => Some(Event::Up),
+            MouseEventKind::ScrollDown => Some(Event::Down),
+            MouseEventKind::Down(_) => Some(Event::MouseSelect {
+                index: mouse.row.saturating_sub(2) as usize,
+            }),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -453,7 +462,7 @@ impl TerminalGuard {
     fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut out = io::stdout();
-        execute!(out, EnterAlternateScreen)?;
+        execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
         Ok(Self {
             terminal: Terminal::new(CrosstermBackend::new(out))?,
         })
@@ -462,7 +471,11 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
         let _ = self.terminal.show_cursor();
     }
 }
@@ -857,6 +870,29 @@ mod tests {
                 .unwrap()
                 .0,
             vec![rollout]
+        );
+    }
+
+    #[test]
+    fn terminal_mouse_scroll_maps_to_keyboard_equivalent_navigation() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent};
+        assert_eq!(
+            map_event(TerminalEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE
+            })),
+            Some(Event::Down)
+        );
+        assert_eq!(
+            map_event(TerminalEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 4,
+                row: 7,
+                modifiers: KeyModifiers::NONE
+            })),
+            Some(Event::MouseSelect { index: 5 })
         );
     }
 }
