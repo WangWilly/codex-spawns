@@ -15,11 +15,11 @@ The header stays visible while rows scroll:
 | `Project` | Current Codex App project, `No Project`, or `unknown` |
 | `Tokens` | Exact tree total, partial lower bound (`≥`), or `unknown` |
 | `Updated` | Most recent recorded activity, shown in local time |
+| `State` | Storage lifecycle: `active`, `archived`, or `missing` |
+| `Profile` | Evidence quality: `complete`, `partial`, `conflict`, `updating`, or `error` |
 | `Agents` | Number of agents or observable spawn attempts |
 | `Depth` | Deepest known level in the agent tree |
 | `Model` | Root conversation model when known |
-| `State` | Storage lifecycle: `active`, `archived`, or `missing` |
-| `Profile` | Evidence quality: `complete`, `partial`, `conflict`, `updating`, or `error` |
 | `ID` | Short Root Conversation ID; the preview shows the full ID |
 
 `State` does not mean that an agent finished. Agent execution states such as

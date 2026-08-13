@@ -315,3 +315,129 @@ fn index_refresh_falls_back_to_nested_app_catalog_when_primary_is_unreadable() {
     );
     assert!(index.app_metadata_status().unwrap().contains("ready"));
 }
+
+#[test]
+fn incremental_refresh_retains_unchanged_child_tokens_and_tree_coverage() {
+    let home = TempDir::new().unwrap();
+    let root = home.path().join("root.jsonl");
+    let child = home.path().join("child.jsonl");
+    std::fs::write(&root, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"root\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":10}}}}\n").unwrap();
+    std::fs::write(&child, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"root\"}}}}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":5}}}}\n").unwrap();
+    let args = [
+        "index",
+        "refresh",
+        "--codex-home",
+        home.path().to_str().unwrap(),
+        "--file",
+        root.to_str().unwrap(),
+        "--file",
+        child.to_str().unwrap(),
+        "--no-state-db",
+    ];
+    Command::cargo_bin("codex-spawns")
+        .unwrap()
+        .args(args)
+        .assert()
+        .success();
+    std::fs::write(&root, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"root\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":12}}}}\n").unwrap();
+    Command::cargo_bin("codex-spawns")
+        .unwrap()
+        .args(args)
+        .assert()
+        .success();
+
+    let index = ProfileIndex::open(IndexOptions {
+        path: home.path().join("cache/codex-spawns/index.sqlite"),
+    })
+    .unwrap();
+    let profile = index.profile("root").unwrap().unwrap();
+    assert_eq!(
+        profile
+            .conversation
+            .tokens
+            .usage
+            .value
+            .unwrap()
+            .total_tokens,
+        17
+    );
+    assert_eq!(
+        (
+            profile.conversation.tokens.covered_sessions,
+            profile.conversation.tokens.total_sessions
+        ),
+        (2, 2)
+    );
+    assert_eq!(
+        profile
+            .agents
+            .iter()
+            .find(|agent| agent.id == "child")
+            .unwrap()
+            .tokens
+            .value
+            .as_ref()
+            .unwrap()
+            .total_tokens,
+        5
+    );
+}
+
+#[test]
+fn app_failure_without_rollout_changes_retains_enrichment_and_degrades_profile() {
+    let home = TempDir::new().unwrap();
+    let catalog = home.path().join("state_5.sqlite");
+    let connection = rusqlite::Connection::open(&catalog).unwrap();
+    connection.execute_batch("CREATE TABLE threads(id TEXT PRIMARY KEY,title TEXT,tokens_used INTEGER); INSERT INTO threads VALUES('01900000-0000-7000-8000-000000000001','Retained App title',44);").unwrap();
+    let global = home.path().join(".codex-global-state.json");
+    std::fs::write(&global, r#"{"local-projects":{},"thread-project-assignments":{},"projectless-thread-ids":["01900000-0000-7000-8000-000000000001"]}"#).unwrap();
+    let args = [
+        "index",
+        "refresh",
+        "--codex-home",
+        home.path().to_str().unwrap(),
+        "--file",
+        &fixture("parent.jsonl"),
+        "--no-state-db",
+    ];
+    Command::cargo_bin("codex-spawns")
+        .unwrap()
+        .args(args)
+        .assert()
+        .success();
+    std::fs::write(&global, "invalid json").unwrap();
+    Command::cargo_bin("codex-spawns")
+        .unwrap()
+        .args(args)
+        .assert()
+        .success();
+
+    let index = ProfileIndex::open(IndexOptions {
+        path: home.path().join("cache/codex-spawns/index.sqlite"),
+    })
+    .unwrap();
+    let page = index.browse(&Default::default(), None, 25).unwrap();
+    assert_eq!(page.conversations[0].title, "Retained App title");
+    assert_eq!(
+        page.conversations[0].project.value,
+        Some(ProjectAssignment::Projectless)
+    );
+    assert_eq!(
+        page.conversations[0]
+            .tokens
+            .usage
+            .value
+            .as_ref()
+            .unwrap()
+            .total_tokens,
+        44
+    );
+    assert_eq!(
+        page.semantics["01900000-0000-7000-8000-000000000001"].1,
+        codex_spawns::index::ProfileQuality::Partial
+    );
+    assert!(index
+        .app_metadata_status()
+        .unwrap()
+        .starts_with("App metadata unavailable:"));
+}

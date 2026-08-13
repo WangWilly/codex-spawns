@@ -258,6 +258,117 @@ fn failed_app_refresh_retains_the_last_valid_title_project_and_fallback_tokens()
 }
 
 #[test]
+fn changed_source_delta_retains_unchanged_descendant_usage_and_coverage() {
+    let (_dir, mut index) = open();
+    let mut full = conversation("root", "1");
+    full.tokens = token_summary(300, 2, 2);
+    full.agent_count = 1;
+    full.max_depth = 1;
+    let root_agent = token_agent("root", "root", 100);
+    let child_agent = token_agent("child", "root", 200);
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![full],
+                agents: vec![root_agent, child_agent.clone()],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+    let mut delta = conversation("root", "2");
+    delta.tokens = token_summary(150, 1, 1);
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![delta],
+                agents: vec![token_agent("root", "root", 150)],
+                preserve_profile_evidence: true,
+                app_metadata_diagnostic: Some("App metadata unavailable: fixture".into()),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+    let profile = index.profile("root").unwrap().unwrap();
+    assert_eq!(
+        profile
+            .conversation
+            .tokens
+            .usage
+            .value
+            .unwrap()
+            .total_tokens,
+        350
+    );
+    assert_eq!(
+        (
+            profile.conversation.tokens.covered_sessions,
+            profile.conversation.tokens.total_sessions
+        ),
+        (2, 2)
+    );
+    assert_eq!(
+        (
+            profile.conversation.agent_count,
+            profile.conversation.max_depth
+        ),
+        (1, 1)
+    );
+    assert_eq!(
+        profile
+            .agents
+            .iter()
+            .find(|agent| agent.id == "child")
+            .unwrap()
+            .tokens,
+        child_agent.tokens
+    );
+}
+
+#[test]
+fn app_failure_without_changed_rollouts_retains_values_and_degrades_quality_atomically() {
+    let (_dir, mut index) = open();
+    let mut enriched = conversation("root", "1");
+    enriched.title = "App title".into();
+    enriched.title_source = "app".into();
+    enriched.project = ProfileFact::observed(
+        ProjectAssignment::Projectless,
+        crate::SourceRef::Derived { rule: "app".into() },
+    );
+    enriched.tokens = token_summary(90, 1, 1);
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![enriched.clone()],
+                app_metadata_refreshed: true,
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    index
+        .refresh(
+            RefreshBatch {
+                preserve_profile_evidence: true,
+                app_metadata_diagnostic: Some("App metadata unavailable: fixture".into()),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    let page = index
+        .browse(&ConversationFilter::default(), None, 25)
+        .unwrap();
+    assert_eq!(page.semantics["root"].1, ProfileQuality::Partial);
+    assert_eq!(page.conversations[0].title, "App title");
+    assert_eq!(page.conversations[0].project, enriched.project);
+    assert_eq!(page.conversations[0].tokens, enriched.tokens);
+}
+
+#[test]
 fn conflicting_token_evidence_marks_the_profile_without_hiding_effective_usage() {
     let (_dir, mut index) = open();
     let mut record = conversation("root", "1");
@@ -334,6 +445,34 @@ fn token_summary(total: u64, covered: usize, sessions: usize) -> TokenUsageSumma
         ),
         covered_sessions: covered,
         total_sessions: sessions,
+    }
+}
+
+fn token_agent(id: &str, root: &str, total: u64) -> AgentRecord {
+    AgentRecord {
+        id: id.into(),
+        root_id: root.into(),
+        parent_id: (id != root).then(|| root.into()),
+        agent_path: None,
+        task_name: Some(id.into()),
+        task_excerpt: None,
+        title: id.into(),
+        role: None,
+        nickname: None,
+        model: None,
+        effort: None,
+        status: "complete".into(),
+        depth: u32::from(id != root),
+        evidence_complete: true,
+        tokens: ProfileFact::observed(
+            TokenUsage {
+                total_tokens: total,
+                ..Default::default()
+            },
+            crate::SourceRef::Derived {
+                rule: "fixture".into(),
+            },
+        ),
     }
 }
 

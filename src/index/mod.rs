@@ -243,6 +243,8 @@ pub struct RefreshBatch {
     /// True only when both Codex App stores were read as one valid snapshot.
     pub app_metadata_refreshed: bool,
     pub app_metadata_diagnostic: Option<String>,
+    /// Merge a changed-source delta with indexed session/token evidence.
+    pub preserve_profile_evidence: bool,
     /// Testable failure injection at the public transaction boundary.
     pub reject_reason: Option<String>,
 }
@@ -736,7 +738,14 @@ fn apply_batch<F: FnMut(RefreshEvent)>(
                 "unavailable"
             })],
     )?;
-    for c in &batch.conversations {
+    for incoming in &batch.conversations {
+        let merged;
+        let c = if batch.preserve_profile_evidence {
+            merged = merge_conversation_delta(tx, incoming, &batch.agents)?;
+            &merged
+        } else {
+            incoming
+        };
         let (project_kind, project_id, project_name) = project_columns(&c.project);
         let token_total = c
             .tokens
@@ -758,6 +767,22 @@ fn apply_batch<F: FnMut(RefreshEvent)>(
         tx.execute("INSERT INTO conversation_versions(id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,conversation_state,profile_quality,indexed_generation,project_json,project_kind,project_id,project_name,tokens_json,token_total)
           SELECT id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,conversation_state,profile_quality,indexed_generation,project_json,project_kind,project_id,project_name,tokens_json,token_total FROM conversations WHERE id=?1",
           [&c.id])?;
+    }
+    if !batch.app_metadata_refreshed
+        && batch
+            .app_metadata_diagnostic
+            .as_deref()
+            .is_some_and(|value| value.starts_with("App metadata unavailable:"))
+    {
+        tx.execute(
+            "UPDATE conversations SET profile_quality='partial',profile_complete=0,indexed_generation=?1",
+            [generation],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO conversation_versions(id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,conversation_state,profile_quality,indexed_generation,project_json,project_kind,project_id,project_name,tokens_json,token_total)
+             SELECT id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,conversation_state,profile_quality,indexed_generation,project_json,project_kind,project_id,project_name,tokens_json,token_total FROM conversations",
+            [],
+        )?;
     }
     // Keep snapshots bounded while always retaining the latest version of every
     // conversation. Cursors older than this explicit window expire cleanly.
@@ -798,6 +823,95 @@ fn apply_batch<F: FnMut(RefreshEvent)>(
         }
     }
     Ok(())
+}
+
+fn merge_conversation_delta(
+    tx: &Transaction<'_>,
+    incoming: &ConversationRecord,
+    incoming_agents: &[AgentRecord],
+) -> Result<ConversationRecord, IndexError> {
+    let prior = tx
+        .query_row(
+            "SELECT id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,project_json,tokens_json FROM conversations WHERE id=?1",
+            [&incoming.id],
+            row_to_conversation,
+        )
+        .optional()?;
+    let Some(prior) = prior else {
+        return Ok(incoming.clone());
+    };
+    let mut merged = incoming.clone();
+    let existing_agent_ids = {
+        let mut statement = tx.prepare("SELECT id FROM agents WHERE root_id=?1")?;
+        let ids = statement
+            .query_map([&incoming.id], |row| row.get::<_, String>(0))?
+            .collect::<Result<HashSet<_>, _>>()?;
+        ids
+    };
+    let new_agents = incoming_agents
+        .iter()
+        .filter(|agent| {
+            agent.root_id == incoming.id
+                && agent.id != incoming.id
+                && !existing_agent_ids.contains(&agent.id)
+        })
+        .count() as u64;
+    merged.agent_count = prior.agent_count.saturating_add(new_agents);
+    merged.max_depth = prior.max_depth.max(incoming.max_depth);
+    let incoming_ids = incoming_agents
+        .iter()
+        .filter(|agent| agent.root_id == incoming.id && agent.tokens.value.is_some())
+        .map(|agent| agent.id.as_str())
+        .collect::<Vec<_>>();
+    let mut replaced_sessions = 0usize;
+    let mut replaced_covered = 0usize;
+    let mut replaced_total = 0u64;
+    for id in incoming_ids {
+        let old = tx
+            .query_row("SELECT tokens_json FROM agents WHERE id=?1", [id], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .optional()?
+            .flatten()
+            .and_then(|json| serde_json::from_str::<ProfileFact<TokenUsage>>(&json).ok());
+        if let Some(old) = old {
+            replaced_sessions += 1;
+            if let Some(usage) = old.value {
+                replaced_covered += 1;
+                replaced_total = replaced_total.saturating_add(usage.total_tokens);
+            }
+        }
+    }
+    merged.tokens.total_sessions = prior
+        .tokens
+        .total_sessions
+        .saturating_sub(replaced_sessions)
+        .saturating_add(incoming.tokens.total_sessions);
+    merged.tokens.covered_sessions = prior
+        .tokens
+        .covered_sessions
+        .saturating_sub(replaced_covered)
+        .saturating_add(incoming.tokens.covered_sessions);
+    if let Some(new_usage) = merged.tokens.usage.value.as_mut() {
+        let retained = prior
+            .tokens
+            .usage
+            .value
+            .as_ref()
+            .map_or(0, |usage| usage.total_tokens)
+            .saturating_sub(replaced_total);
+        new_usage.total_tokens = new_usage.total_tokens.saturating_add(retained);
+    } else {
+        merged.tokens.usage = prior.tokens.usage;
+    }
+    if !batch_like_app_value(&incoming.project) {
+        merged.project = prior.project;
+    }
+    Ok(merged)
+}
+
+fn batch_like_app_value(project: &ProfileFact<ProjectAssignment>) -> bool {
+    project.value.is_some()
 }
 
 fn apply_semantics(

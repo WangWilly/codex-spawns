@@ -219,7 +219,18 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                             if let Some(agent) =
                                 index.agent(&agent_id).map_err(|e| e.to_string())?
                             {
-                                app.update(Event::AgentDetailLoaded(summary_detail(agent)));
+                                let conversation_tokens = if agent.id == agent.root_id {
+                                    index
+                                        .profile(&agent.root_id)
+                                        .map_err(|e| e.to_string())?
+                                        .map(|profile| profile.conversation.tokens)
+                                } else {
+                                    None
+                                };
+                                app.update(Event::AgentDetailLoaded(summary_detail(
+                                    agent,
+                                    conversation_tokens.as_ref(),
+                                )));
                             }
                         }
                         Command::OpenEvidence { agent_id } => {
@@ -331,7 +342,10 @@ fn app_browse_order(app: &App) -> BrowseOrder {
     }
 }
 
-fn summary_detail(agent: AgentRecord) -> codex_spawns::interactive::AgentDetail {
+fn summary_detail(
+    agent: AgentRecord,
+    conversation_tokens: Option<&TokenUsageSummary>,
+) -> codex_spawns::interactive::AgentDetail {
     let mut lines = vec![
         ("status".into(), agent.status),
         ("depth".into(), agent.depth.to_string()),
@@ -375,6 +389,12 @@ fn summary_detail(agent: AgentRecord) -> codex_spawns::interactive::AgentDetail 
         "tokens confidence".into(),
         format!("{:?}", agent.tokens.confidence).to_lowercase(),
     ));
+    for conflict in &agent.tokens.conflicting_values {
+        lines.push((
+            "conflicting total tokens".into(),
+            conflict.total_tokens.to_string(),
+        ));
+    }
     if let Some(usage) = agent.tokens.value {
         for (label, value) in [
             ("input tokens", usage.input_tokens),
@@ -389,6 +409,27 @@ fn summary_detail(agent: AgentRecord) -> codex_spawns::interactive::AgentDetail 
             ));
         }
         lines.push(("total tokens".into(), usage.total_tokens.to_string()));
+    }
+    if let Some(summary) = conversation_tokens {
+        lines.push((
+            "conversation token coverage".into(),
+            format!(
+                "{}/{} sessions",
+                summary.covered_sessions, summary.total_sessions
+            ),
+        ));
+        if let Some(usage) = &summary.usage.value {
+            lines.push((
+                "conversation total tokens".into(),
+                usage.total_tokens.to_string(),
+            ));
+        }
+        for conflict in &summary.usage.conflicting_values {
+            lines.push((
+                "conversation conflicting total tokens".into(),
+                conflict.total_tokens.to_string(),
+            ));
+        }
     }
     codex_spawns::interactive::AgentDetail {
         agent_id: agent.id,
@@ -522,6 +563,7 @@ fn refresh_worker(
     let mut batch = refresh_batch(&scan, &files, &dbs)?;
     batch.app_metadata_refreshed = app_ok;
     batch.app_metadata_diagnostic = app_metadata_diagnostic(&scan);
+    batch.preserve_profile_evidence = !reproject && !app_ok;
     apply_refresh(&mut index, batch, reproject)?;
     let page = index
         .browse_ordered(&filter, None, page_size, order)
@@ -887,6 +929,7 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
             let mut batch = refresh_batch(&scan, &files, &dbs)?;
             batch.app_metadata_refreshed = app_ok;
             batch.app_metadata_diagnostic = app_metadata_diagnostic(&scan);
+            batch.preserve_profile_evidence = !reproject && !app_ok;
             apply_refresh(&mut index, batch, reproject)?;
             let stats = index.stats().map_err(|e| e.to_string())?;
             println!(
@@ -1187,6 +1230,7 @@ pub(crate) fn refresh_batch(
         discovered_all_sources: true,
         app_metadata_refreshed: false,
         app_metadata_diagnostic: None,
+        preserve_profile_evidence: false,
         reject_reason: None,
     })
 }
@@ -1649,6 +1693,61 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn agent_and_conversation_details_keep_both_conflicting_token_totals_visible() {
+        let mut agent = AgentRecord {
+            id: "root".into(),
+            root_id: "root".into(),
+            parent_id: None,
+            agent_path: None,
+            task_name: None,
+            task_excerpt: None,
+            title: "Root".into(),
+            role: None,
+            nickname: None,
+            model: None,
+            effort: None,
+            status: "complete".into(),
+            depth: 0,
+            evidence_complete: true,
+            tokens: ProfileFact::observed(
+                codex_spawns::TokenUsage {
+                    total_tokens: 120,
+                    ..Default::default()
+                },
+                codex_spawns::SourceRef::Derived {
+                    rule: "rollout".into(),
+                },
+            ),
+        };
+        agent.tokens.confidence = FactConfidence::Conflicting;
+        agent
+            .tokens
+            .conflicting_values
+            .push(codex_spawns::TokenUsage {
+                total_tokens: 100,
+                ..Default::default()
+            });
+        let summary = TokenUsageSummary {
+            usage: agent.tokens.clone(),
+            covered_sessions: 1,
+            total_sessions: 2,
+        };
+        let detail = summary_detail(agent, Some(&summary));
+        assert!(detail
+            .lines
+            .contains(&("total tokens".into(), "120".into())));
+        assert!(detail
+            .lines
+            .contains(&("conflicting total tokens".into(), "100".into())));
+        assert!(detail
+            .lines
+            .contains(&("conversation total tokens".into(), "120".into())));
+        assert!(detail
+            .lines
+            .contains(&("conversation conflicting total tokens".into(), "100".into())));
     }
 
     #[test]
