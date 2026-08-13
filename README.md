@@ -58,9 +58,9 @@ codex-spawns
 ```
 
 The initial screen lists Root Conversations by recent activity, newest first.
-Its fixed headers identify the title, update time, agent count, tree depth,
-conversation state, profile quality, and short ID. Open a row to inspect its
-full Agent Tree and the selected agent's profile. Existing index data appears
+Its fixed headers are `Title | Project | Tokens | Updated | State | Profile |
+Agents | Depth | Model | ID`. Open a row to inspect its full-width Agent Table;
+open an agent to enter its separate full-screen detail view. Existing index data appears
 immediately while changed rollouts refresh in the background.
 
 The default data source is `$CODEX_HOME`, or `~/.codex` when that variable is
@@ -79,18 +79,20 @@ unset. Active and archived sessions are included unless disabled.
 | `Esc`, `Backspace`, `h` | Return to the previous view and position |
 | `s` | Choose a sort column; choosing it again reverses direction |
 | `/` | Search indexed metadata |
-| `f` | Change filters |
+| `f` | Cycle active, archived, and all-conversation filters |
+| `p` | Cycle App project filters by stable project ID, then No Project and unknown |
 | `r` | Incrementally refresh the index |
 | `R` | Confirm and rebuild the index |
 | `e` | Open raw evidence on demand |
 | `m` | Show the complete task message after the privacy prompt |
-| `Tab`, `Shift+Tab` | Switch between tree and detail panes |
 | `?` | Show help |
 | `q` | Quit |
 
 Mouse input is optional. Status is never communicated by color alone, and
 `NO_COLOR` is respected. Clicking a sortable column header selects it; clicking
-the active header reverses its direction. See the
+the active header reverses its direction. A single row click selects; a bounded
+double-click opens a conversation or agent. Root and Agent title widths are
+stored independently. See the
 [Interactive Mode manual](docs/manual/interactive-mode.md) for table semantics,
 navigation behavior, sorting, and conversation-title migration.
 

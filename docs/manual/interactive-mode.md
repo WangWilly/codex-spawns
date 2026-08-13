@@ -12,9 +12,12 @@ The header stays visible while rows scroll:
 | Column | Meaning |
 | --- | --- |
 | `Title` | A human-readable conversation title |
+| `Project` | Current Codex App project, `No Project`, or `unknown` |
+| `Tokens` | Exact tree total, partial lower bound (`≥`), or `unknown` |
 | `Updated` | Most recent recorded activity, shown in local time |
 | `Agents` | Number of agents or observable spawn attempts |
 | `Depth` | Deepest known level in the agent tree |
+| `Model` | Root conversation model when known |
 | `State` | Storage lifecycle: `active`, `archived`, or `missing` |
 | `Profile` | Evidence quality: `complete`, `partial`, `conflict`, `updating`, or `error` |
 | `ID` | Short Root Conversation ID; the preview shows the full ID |
@@ -37,9 +40,15 @@ are scrolled horizontally.
   and horizontal positions, sorting, and filter are restored.
 
 During search entry, `Backspace` edits the query. Press `Esc` to leave search
-before using a return key. Each Agent Tree, detail pane, and help screen keeps
-its own viewport. In detail views, `w` switches between wrapped and unwrapped
-content.
+before using a return key. The Agent Table and its full-screen Agent Detail are
+separate navigation states; Back restores the selected agent and table
+viewports. Agent Detail and Help keep independent scroll positions. In detail
+views, `w` switches between wrapped and unwrapped content. Root and Agent
+tables persist independently adjustable frozen `Title` widths.
+
+Press `f` to cycle all, active-only, and archived-only conversations. Press `p`
+to cycle projects in display-name and stable-ID order, followed by `No Project`
+and `unknown`; filtering uses the stable App project ID even when names repeat.
 
 ## Sort the complete catalog
 

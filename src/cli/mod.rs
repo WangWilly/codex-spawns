@@ -223,18 +223,38 @@ pub(crate) fn scan_with_optional_app(
     files: &[PathBuf],
     dbs: &[PathBuf],
 ) -> Result<(ScanResult, bool), String> {
-    let paths = app_metadata_paths(common);
-    match load_app_metadata(&paths) {
-        Ok(app) => scan_sources_with_app_metadata(files, dbs, Some(&app))
-            .map(|scan| (scan, true))
-            .map_err(|e| e.to_string()),
-        Err(error) => {
-            let diagnostic = format!("App metadata unavailable: {error}");
-            let mut scan =
-                scan_sources_with_app_metadata(files, dbs, None).map_err(|e| e.to_string())?;
-            scan.diagnostics.push(diagnostic);
-            Ok((scan, false))
+    let home = codex_home(common);
+    let global = home.join(".codex-global-state.json");
+    let candidates = [
+        home.join("state_5.sqlite"),
+        home.join("sqlite/state_5.sqlite"),
+    ];
+    let mut failures = Vec::new();
+    for catalog in candidates {
+        let paths = AppMetadataPaths::new(catalog, global.clone());
+        match load_app_metadata(&paths) {
+            Ok(app) => {
+                return scan_sources_with_app_metadata(files, dbs, Some(&app))
+                    .map(|mut scan| {
+                        if !failures.is_empty() {
+                            scan.diagnostics.push(format!(
+                                "App metadata ready after fallback: {}",
+                                failures.join("; ")
+                            ));
+                        }
+                        (scan, true)
+                    })
+                    .map_err(|e| e.to_string())
+            }
+            Err(error) => failures.push(error.to_string()),
         }
+    }
+    {
+        let diagnostic = format!("App metadata unavailable: {}", failures.join("; "));
+        let mut scan =
+            scan_sources_with_app_metadata(files, dbs, None).map_err(|e| e.to_string())?;
+        scan.diagnostics.push(diagnostic);
+        Ok((scan, false))
     }
 }
 

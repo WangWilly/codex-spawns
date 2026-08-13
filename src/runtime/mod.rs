@@ -23,7 +23,7 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 enum WorkerEvent {
@@ -131,6 +131,7 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
         app.preferences().page_size,
     ));
     let mut terminal = TerminalGuard::enter().map_err(|e| e.to_string())?;
+    let mut clicks = ClickTracker::default();
     loop {
         if let Some(receiver) = refresh.as_ref() {
             if drain_worker(receiver, &mut app)? {
@@ -142,7 +143,9 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
             .draw(|f| interactive::render(f, &app))
             .map_err(|e| e.to_string())?;
         if event::poll(Duration::from_millis(100)).map_err(|e| e.to_string())? {
-            if let Some(input) = map_event(event::read().map_err(|e| e.to_string())?, &app) {
+            if let Some(input) =
+                map_event(event::read().map_err(|e| e.to_string())?, &app, &mut clicks)
+            {
                 for command in app.update(input) {
                     match command {
                         Command::Quit => {
@@ -156,7 +159,11 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                                 .map_err(|e| e.to_string())?;
                             let page = index
                                 .browse_ordered(
-                                    &browse_filter(app.filter(), app.search().to_owned()),
+                                    &browse_filter(
+                                        app.filter(),
+                                        app.project_filter(),
+                                        app.search().to_owned(),
+                                    ),
                                     Some(&cursor),
                                     app.preferences().page_size,
                                     app_browse_order(&app),
@@ -164,10 +171,14 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                                 .map_err(|e| e.to_string())?;
                             app.update(Event::MoreConversationsLoaded(to_page(page)));
                         }
-                        Command::Search { query, filter } => {
+                        Command::Search {
+                            query,
+                            filter,
+                            project,
+                        } => {
                             let page = index
                                 .browse_ordered(
-                                    &browse_filter(filter, query),
+                                    &browse_filter(filter, &project, query),
                                     None,
                                     app.preferences().page_size,
                                     app_browse_order(&app),
@@ -228,7 +239,11 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                                 common.clone(),
                                 path.clone(),
                                 false,
-                                browse_filter(app.filter(), app.search().to_owned()),
+                                browse_filter(
+                                    app.filter(),
+                                    app.project_filter(),
+                                    app.search().to_owned(),
+                                ),
                                 app_browse_order(&app),
                                 app.preferences().page_size,
                             ));
@@ -238,7 +253,11 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                                 common.clone(),
                                 path.clone(),
                                 true,
-                                browse_filter(app.filter(), app.search().to_owned()),
+                                browse_filter(
+                                    app.filter(),
+                                    app.project_filter(),
+                                    app.search().to_owned(),
+                                ),
                                 app_browse_order(&app),
                                 app.preferences().page_size,
                             ));
@@ -246,7 +265,11 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                         Command::Sort { .. } => {
                             let page = index
                                 .browse_ordered(
-                                    &browse_filter(app.filter(), app.search().to_owned()),
+                                    &browse_filter(
+                                        app.filter(),
+                                        app.project_filter(),
+                                        app.search().to_owned(),
+                                    ),
                                     None,
                                     app.preferences().page_size,
                                     app_browse_order(&app),
@@ -262,8 +285,15 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
     }
 }
 
-fn browse_filter(filter: codex_spawns::interactive::Filter, query: String) -> ConversationFilter {
-    use codex_spawns::interactive::Filter;
+fn browse_filter(
+    filter: codex_spawns::interactive::Filter,
+    project: &codex_spawns::interactive::ProjectFilter,
+    query: String,
+) -> ConversationFilter {
+    use codex_spawns::{
+        index::ProjectFilter as IndexProjectFilter,
+        interactive::{Filter, ProjectFilter},
+    };
     ConversationFilter {
         archived: match filter {
             Filter::All => None,
@@ -271,6 +301,12 @@ fn browse_filter(filter: codex_spawns::interactive::Filter, query: String) -> Co
             Filter::ArchivedOnly => Some(true),
         },
         query: (!query.is_empty()).then_some(query),
+        project: match project {
+            ProjectFilter::All => None,
+            ProjectFilter::Assigned(id) => Some(IndexProjectFilter::Assigned(id.clone())),
+            ProjectFilter::NoProject => Some(IndexProjectFilter::Projectless),
+            ProjectFilter::Unknown => Some(IndexProjectFilter::Unknown),
+        },
         ..Default::default()
     }
 }
@@ -485,11 +521,7 @@ fn refresh_worker(
         .map_err(|_| "interactive refresh was cancelled".to_string())?;
     let mut batch = refresh_batch(&scan, &files, &dbs)?;
     batch.app_metadata_refreshed = app_ok;
-    batch.app_metadata_diagnostic = scan
-        .diagnostics
-        .iter()
-        .find(|value| value.starts_with("App metadata unavailable:"))
-        .cloned();
+    batch.app_metadata_diagnostic = app_metadata_diagnostic(&scan);
     apply_refresh(&mut index, batch, reproject)?;
     let page = index
         .browse_ordered(&filter, None, page_size, order)
@@ -649,7 +681,21 @@ fn profile_quality_label(quality: ProfileQuality) -> &'static str {
         ProfileQuality::Error => "error",
     }
 }
-fn map_event(e: TerminalEvent, app: &App) -> Option<Event> {
+#[derive(Default)]
+struct ClickTracker {
+    last: Option<(Instant, u16, u16, crossterm::event::MouseButton)>,
+}
+
+fn map_event(e: TerminalEvent, app: &App, clicks: &mut ClickTracker) -> Option<Event> {
+    map_event_at(e, app, clicks, Instant::now())
+}
+
+fn map_event_at(
+    e: TerminalEvent,
+    app: &App,
+    clicks: &mut ClickTracker,
+    now: Instant,
+) -> Option<Event> {
     match e {
         TerminalEvent::Resize(width, height) => Some(Event::Resize { width, height }),
         TerminalEvent::Key(k) if k.kind == KeyEventKind::Press => match k.code {
@@ -685,7 +731,28 @@ fn map_event(e: TerminalEvent, app: &App) -> Option<Event> {
         TerminalEvent::Mouse(mouse) => match mouse.kind {
             MouseEventKind::ScrollUp => Some(Event::Up),
             MouseEventKind::ScrollDown => Some(Event::Down),
-            MouseEventKind::Down(_) => mouse_event(app, mouse.column, mouse.row),
+            MouseEventKind::Down(button) => {
+                if button != crossterm::event::MouseButton::Left {
+                    return None;
+                }
+                let event = mouse_event(app, mouse.column, mouse.row)?;
+                let double = clicks.last.is_some_and(|(at, column, row, previous)| {
+                    previous == button
+                        && column == mouse.column
+                        && row == mouse.row
+                        && now.saturating_duration_since(at) <= Duration::from_millis(500)
+                });
+                if double {
+                    clicks.last = None;
+                    match event {
+                        Event::MouseSelect { index } => Some(Event::MouseDoubleClick { index }),
+                        other => Some(other),
+                    }
+                } else {
+                    clicks.last = Some((now, mouse.column, mouse.row, button));
+                    Some(event)
+                }
+            }
             _ => None,
         },
         _ => None,
@@ -694,12 +761,24 @@ fn map_event(e: TerminalEvent, app: &App) -> Option<Event> {
 
 fn mouse_event(app: &App, column: u16, row: u16) -> Option<Event> {
     if app.screen() == codex_spawns::interactive::Screen::Conversations && row == 4 {
-        return conversation_header_sort(column, app.conversation_viewport().column)
-            .map(Event::SelectSort);
+        return conversation_header_sort(
+            column,
+            app.conversation_viewport().column,
+            codex_spawns::interactive::table_title_width(
+                app.root_title_width(),
+                app.conversation_viewport().width,
+            ),
+        )
+        .map(Event::SelectSort);
     }
     if app.screen() == codex_spawns::interactive::Screen::Conversations && row >= 5 {
         return Some(Event::MouseSelect {
             index: app.conversation_viewport().row + row.saturating_sub(5) as usize,
+        });
+    }
+    if app.screen() == codex_spawns::interactive::Screen::Conversation && row >= 5 {
+        return Some(Event::MouseSelect {
+            index: app.tree_viewport().row + row.saturating_sub(5) as usize,
         });
     }
     None
@@ -708,21 +787,35 @@ fn mouse_event(app: &App, column: u16, row: u16) -> Option<Event> {
 fn conversation_header_sort(
     column: u16,
     horizontal_offset: usize,
+    title_width: usize,
 ) -> Option<codex_spawns::interactive::Sort> {
-    use codex_spawns::interactive::Sort;
+    use codex_spawns::interactive::{root_columns, ColumnKey, Sort};
     let column = column as usize;
-    if (2..50).contains(&column) {
+    let columns = root_columns(title_width);
+    let title = columns.first()?;
+    if (3..3 + title.width).contains(&column) {
         return Some(Sort::Title);
     }
-    let moving = column.saturating_sub(52).saturating_add(horizontal_offset);
-    match moving {
-        0..=15 => Some(Sort::Updated),
-        17..=22 => Some(Sort::Agents),
-        24..=28 => Some(Sort::Depth),
-        30..=38 => Some(Sort::State),
-        40..=49 => Some(Sort::Profile),
-        _ => None,
+    let logical = column
+        .saturating_sub(3 + title.width + 2)
+        .saturating_add(horizontal_offset);
+    let mut start = 0;
+    for descriptor in columns.iter().filter(|descriptor| !descriptor.frozen) {
+        if (start..start + descriptor.width).contains(&logical) {
+            return match descriptor.key {
+                ColumnKey::Project => Some(Sort::Project),
+                ColumnKey::Tokens => Some(Sort::Tokens),
+                ColumnKey::Updated => Some(Sort::Updated),
+                ColumnKey::State => Some(Sort::State),
+                ColumnKey::Profile => Some(Sort::Profile),
+                ColumnKey::Agents => Some(Sort::Agents),
+                ColumnKey::Depth => Some(Sort::Depth),
+                _ => None,
+            };
+        }
+        start += descriptor.width + 3;
     }
+    None
 }
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
@@ -793,11 +886,7 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
             )?;
             let mut batch = refresh_batch(&scan, &files, &dbs)?;
             batch.app_metadata_refreshed = app_ok;
-            batch.app_metadata_diagnostic = scan
-                .diagnostics
-                .iter()
-                .find(|value| value.starts_with("App metadata unavailable:"))
-                .cloned();
+            batch.app_metadata_diagnostic = app_metadata_diagnostic(&scan);
             apply_refresh(&mut index, batch, reproject)?;
             let stats = index.stats().map_err(|e| e.to_string())?;
             println!(
@@ -821,6 +910,16 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
 fn app_ok_candidate(common: &Common) -> bool {
     let paths = crate::cli::app_metadata_paths(common);
     paths.thread_catalog.exists() && paths.global_state.exists()
+}
+
+fn app_metadata_diagnostic(scan: &ScanResult) -> Option<String> {
+    scan.diagnostics
+        .iter()
+        .find(|value| {
+            value.starts_with("App metadata unavailable:")
+                || value.starts_with("App metadata ready after fallback:")
+        })
+        .cloned()
 }
 
 fn apply_refresh(
@@ -1012,15 +1111,21 @@ pub(crate) fn refresh_batch(
         });
     }
     let session_by_id: HashMap<_, _> = scan.agent_sessions.iter().map(|a| (&a.id, a)).collect();
-    let mut added = HashSet::new();
+    let mut fulfilled_sessions = HashSet::new();
     for attempt in &scan.spawn_attempts {
-        let id = attempt
-            .child_thread_id
-            .clone()
-            .unwrap_or_else(|| attempt.id.clone());
-        if !added.insert(id.clone()) {
-            continue;
-        }
+        // A fulfilled attempt adopts its session ID so the two evidence streams
+        // merge into one row. Every additional attempt remains independently
+        // addressable by its stable attempt ID.
+        let id = attempt.child_thread_id.as_ref().map_or_else(
+            || attempt.id.clone(),
+            |child| {
+                if fulfilled_sessions.insert(child.clone()) {
+                    child.clone()
+                } else {
+                    attempt.id.clone()
+                }
+            },
+        );
         let root_id = attempt
             .parent_thread_id
             .as_ref()
@@ -1339,6 +1444,7 @@ mod tests {
     fn terminal_mouse_scroll_maps_to_keyboard_equivalent_navigation() {
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent};
         let mut app = App::new(Preferences::default());
+        let mut clicks = ClickTracker::default();
         app.update(Event::SetViewport {
             width: 80,
             height: 3,
@@ -1351,7 +1457,8 @@ mod tests {
                     row: 0,
                     modifiers: KeyModifiers::NONE
                 }),
-                &app
+                &app,
+                &mut clicks,
             ),
             Some(Event::Down)
         );
@@ -1363,7 +1470,8 @@ mod tests {
                     row: 6,
                     modifiers: KeyModifiers::NONE
                 }),
-                &app
+                &app,
+                &mut clicks,
             ),
             Some(Event::MouseSelect { index: 1 })
         );
@@ -1373,8 +1481,14 @@ mod tests {
     fn terminal_keys_cover_page_home_end_back_and_horizontal_navigation() {
         use crossterm::event::KeyEvent;
         let app = App::new(Preferences::default());
-        let key =
-            |code, modifiers| map_event(TerminalEvent::Key(KeyEvent::new(code, modifiers)), &app);
+        let mut clicks = ClickTracker::default();
+        let mut key = |code, modifiers| {
+            map_event(
+                TerminalEvent::Key(KeyEvent::new(code, modifiers)),
+                &app,
+                &mut clicks,
+            )
+        };
         assert_eq!(
             key(KeyCode::PageUp, KeyModifiers::NONE),
             Some(Event::PageUp)
@@ -1413,10 +1527,12 @@ mod tests {
         let mut app = App::new(Preferences::default());
         app.update(Event::Key('/'));
         app.update(Event::Key('x'));
+        let mut clicks = ClickTracker::default();
         assert_eq!(
             map_event(
                 TerminalEvent::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
                 &app,
+                &mut clicks,
             ),
             Some(Event::Key('\u{8}'))
         );
@@ -1433,17 +1549,207 @@ mod tests {
             mouse_event(&app, 3, 4),
             Some(Event::SelectSort(codex_spawns::interactive::Sort::Title))
         );
-        assert_eq!(
-            mouse_event(&app, 54, 4),
-            Some(Event::SelectSort(codex_spawns::interactive::Sort::Updated))
+        use codex_spawns::interactive::{root_columns, ColumnKey, Sort};
+        let expected = [
+            (ColumnKey::Project, Sort::Project),
+            (ColumnKey::Tokens, Sort::Tokens),
+            (ColumnKey::Updated, Sort::Updated),
+            (ColumnKey::State, Sort::State),
+            (ColumnKey::Profile, Sort::Profile),
+            (ColumnKey::Agents, Sort::Agents),
+            (ColumnKey::Depth, Sort::Depth),
+        ];
+        let title_width = codex_spawns::interactive::table_title_width(
+            app.root_title_width(),
+            app.conversation_viewport().width,
         );
-        assert_eq!(
-            mouse_event(&app, 70, 4),
-            Some(Event::SelectSort(codex_spawns::interactive::Sort::Agents))
-        );
+        let mut x = 3 + title_width + 2;
+        for descriptor in root_columns(title_width)
+            .into_iter()
+            .filter(|column| !column.frozen)
+        {
+            if let Some((_, sort)) = expected.iter().find(|(key, _)| *key == descriptor.key) {
+                assert_eq!(
+                    mouse_event(&app, x as u16, 4),
+                    Some(Event::SelectSort(*sort)),
+                    "header {}",
+                    descriptor.header
+                );
+            }
+            x += descriptor.width + 3;
+        }
         assert_eq!(
             mouse_event(&app, 3, 6),
             Some(Event::MouseSelect { index: 1 })
+        );
+        app.update(Event::SetViewport {
+            width: 30,
+            height: 2,
+        });
+        let narrow_title = codex_spawns::interactive::table_title_width(app.root_title_width(), 30);
+        assert_eq!(
+            mouse_event(&app, (3 + narrow_title + 2) as u16, 4),
+            Some(Event::SelectSort(Sort::Project))
+        );
+    }
+
+    #[test]
+    fn duplicate_spawn_attempts_remain_rows_while_one_merges_with_the_session() {
+        let fixture = |name: &str| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(name)
+        };
+        let parent = fixture("parent.jsonl");
+        let child = fixture("child.jsonl");
+        let mut scan = codex_spawns::scan_sources(&[parent.clone(), child.clone()], &[]).unwrap();
+        let mut retry = scan.spawn_attempts[0].clone();
+        retry.id = "retry-attempt".into();
+        retry.call_id = Some("call-retry".into());
+        scan.spawn_attempts.push(retry);
+        let batch = refresh_batch(&scan, &[parent, child], &[]).unwrap();
+        let child_id = "01900000-0000-7000-8000-000000000002";
+        assert_eq!(
+            batch
+                .agents
+                .iter()
+                .filter(|agent| agent.id == child_id)
+                .count(),
+            1
+        );
+        assert!(batch.agents.iter().any(|agent| agent.id == "retry-attempt"));
+        assert_eq!(batch.agents.len(), 3);
+    }
+
+    #[test]
+    fn tui_project_filters_map_to_stable_index_project_filters() {
+        use codex_spawns::{
+            index::ProjectFilter as IndexProjectFilter, interactive::ProjectFilter,
+        };
+        let cases = [
+            (
+                ProjectFilter::Assigned("project-id".into()),
+                Some(IndexProjectFilter::Assigned("project-id".into())),
+            ),
+            (
+                ProjectFilter::NoProject,
+                Some(IndexProjectFilter::Projectless),
+            ),
+            (ProjectFilter::Unknown, Some(IndexProjectFilter::Unknown)),
+            (ProjectFilter::All, None),
+        ];
+        for (project, expected) in cases {
+            assert_eq!(
+                browse_filter(
+                    codex_spawns::interactive::Filter::All,
+                    &project,
+                    String::new()
+                )
+                .project,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn agent_mouse_rows_are_viewport_relative_and_bounded_double_click_opens() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent};
+        let mut app = App::new(Preferences::default());
+        app.update(Event::ConversationsLoaded(Page {
+            items: vec![codex_spawns::interactive::ConversationItem {
+                id: "root".into(),
+                title: "Root".into(),
+                cwd: String::new(),
+                last_activity_at: String::new(),
+                archived: false,
+                agent_count: 2,
+                max_depth: 1,
+                profile_complete: true,
+                title_source: "fixture".into(),
+                state: "active".into(),
+                profile: "complete".into(),
+                project: Default::default(),
+                tokens: Default::default(),
+                model: None,
+            }],
+            next_cursor: None,
+            approximate_total: Some(1),
+        }));
+        app.update(Event::Enter);
+        app.update(Event::AgentsLoaded {
+            conversation_id: "root".into(),
+            agents: vec![
+                codex_spawns::interactive::AgentItem {
+                    id: "root".into(),
+                    parent_id: None,
+                    depth: 0,
+                    status: codex_spawns::interactive::AgentStatus::Complete,
+                    task_name: "root conversation".into(),
+                    title: "Root".into(),
+                    role: None,
+                    nickname: None,
+                    model: None,
+                    effort: None,
+                    detail_loaded: false,
+                    tokens: Default::default(),
+                },
+                codex_spawns::interactive::AgentItem {
+                    id: "child".into(),
+                    parent_id: Some("root".into()),
+                    depth: 1,
+                    status: codex_spawns::interactive::AgentStatus::Complete,
+                    task_name: "child".into(),
+                    title: "Child".into(),
+                    role: None,
+                    nickname: None,
+                    model: None,
+                    effort: None,
+                    detail_loaded: false,
+                    tokens: Default::default(),
+                },
+            ],
+        });
+        app.update(Event::SetViewport {
+            width: 80,
+            height: 1,
+        });
+        app.update(Event::Down);
+        assert_eq!(app.tree_viewport().row, 1);
+        let click = |row| {
+            TerminalEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 4,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let start = Instant::now();
+        let mut tracker = ClickTracker::default();
+        assert_eq!(
+            map_event_at(click(5), &app, &mut tracker, start),
+            Some(Event::MouseSelect { index: 1 })
+        );
+        assert_eq!(
+            map_event_at(
+                click(5),
+                &app,
+                &mut tracker,
+                start + Duration::from_millis(300)
+            ),
+            Some(Event::MouseDoubleClick { index: 1 })
+        );
+        assert_eq!(
+            map_event_at(click(5), &app, &mut tracker, start + Duration::from_secs(2)),
+            Some(Event::MouseSelect { index: 1 })
+        );
+        assert_eq!(
+            map_event_at(
+                click(6),
+                &app,
+                &mut tracker,
+                start + Duration::from_millis(2100)
+            ),
+            Some(Event::MouseSelect { index: 2 })
         );
     }
 }

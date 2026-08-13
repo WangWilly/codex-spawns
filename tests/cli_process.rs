@@ -276,3 +276,42 @@ fn index_refresh_reads_app_metadata_only_from_the_injected_codex_home() {
         (1, 2)
     );
 }
+
+#[test]
+fn index_refresh_falls_back_to_nested_app_catalog_when_primary_is_unreadable() {
+    let home = TempDir::new().unwrap();
+    std::fs::write(home.path().join("state_5.sqlite"), "not sqlite").unwrap();
+    std::fs::create_dir(home.path().join("sqlite")).unwrap();
+    let nested = home.path().join("sqlite/state_5.sqlite");
+    let connection = rusqlite::Connection::open(&nested).unwrap();
+    connection.execute_batch("CREATE TABLE threads(id TEXT PRIMARY KEY,title TEXT,tokens_used INTEGER); INSERT INTO threads VALUES('01900000-0000-7000-8000-000000000001','Nested title',77);").unwrap();
+    std::fs::write(home.path().join(".codex-global-state.json"), r#"{"local-projects":{},"thread-project-assignments":{},"projectless-thread-ids":["01900000-0000-7000-8000-000000000001"]}"#).unwrap();
+
+    Command::cargo_bin("codex-spawns")
+        .unwrap()
+        .args([
+            "index",
+            "refresh",
+            "--codex-home",
+            home.path().to_str().unwrap(),
+            "--file",
+            &fixture("parent.jsonl"),
+            "--no-state-db",
+        ])
+        .assert()
+        .success();
+    let index = ProfileIndex::open(IndexOptions {
+        path: home.path().join("cache/codex-spawns/index.sqlite"),
+    })
+    .unwrap();
+    let profile = index
+        .profile("01900000-0000-7000-8000-000000000001")
+        .unwrap()
+        .unwrap();
+    assert_eq!(profile.conversation.title, "Nested title");
+    assert_eq!(
+        profile.conversation.project.value,
+        Some(ProjectAssignment::Projectless)
+    );
+    assert!(index.app_metadata_status().unwrap().contains("ready"));
+}
