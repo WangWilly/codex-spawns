@@ -95,7 +95,14 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
     app.update(Event::ConversationsLoaded(to_page(page)));
     // Stale-first: the cached page above is immediately usable while source
     // discovery and parsing happen on a worker thread.
-    let mut refresh = Some(start_refresh(common.clone(), path.clone(), false));
+    let mut refresh = Some(start_refresh(
+        common.clone(),
+        path.clone(),
+        false,
+        ConversationFilter::default(),
+        BrowseOrder::default(),
+        app.preferences().page_size,
+    ));
     let mut terminal = TerminalGuard::enter().map_err(|e| e.to_string())?;
     loop {
         if let Some(receiver) = refresh.as_ref() {
@@ -121,9 +128,9 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                                 .map_err(|e| e.to_string())?;
                             let page = index
                                 .browse_ordered(
-                                    &ConversationFilter::default(),
+                                    &browse_filter(app.filter(), app.search().to_owned()),
                                     Some(&cursor),
-                                    25,
+                                    app.preferences().page_size,
                                     app_browse_order(&app),
                                 )
                                 .map_err(|e| e.to_string())?;
@@ -187,10 +194,24 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                             )));
                         }
                         Command::Refresh if refresh.is_none() => {
-                            refresh = Some(start_refresh(common.clone(), path.clone(), false));
+                            refresh = Some(start_refresh(
+                                common.clone(),
+                                path.clone(),
+                                false,
+                                browse_filter(app.filter(), app.search().to_owned()),
+                                app_browse_order(&app),
+                                app.preferences().page_size,
+                            ));
                         }
                         Command::Rebuild if refresh.is_none() => {
-                            refresh = Some(start_refresh(common.clone(), path.clone(), true));
+                            refresh = Some(start_refresh(
+                                common.clone(),
+                                path.clone(),
+                                true,
+                                browse_filter(app.filter(), app.search().to_owned()),
+                                app_browse_order(&app),
+                                app.preferences().page_size,
+                            ));
                         }
                         Command::Sort { .. } => {
                             let page = index
@@ -343,10 +364,19 @@ fn source_detail(
     }
 }
 
-fn start_refresh(common: Common, path: PathBuf, rebuild: bool) -> Receiver<WorkerEvent> {
+fn start_refresh(
+    common: Common,
+    path: PathBuf,
+    rebuild: bool,
+    filter: ConversationFilter,
+    order: BrowseOrder,
+    page_size: usize,
+) -> Receiver<WorkerEvent> {
     let (sender, receiver) = mpsc::sync_channel(16);
     thread::spawn(move || {
-        if let Err(error) = refresh_worker(&common, path, rebuild, &sender) {
+        if let Err(error) =
+            refresh_worker(&common, path, rebuild, filter, order, page_size, &sender)
+        {
             let _ = sender.send(WorkerEvent::Failed(error));
         }
     });
@@ -357,6 +387,9 @@ fn refresh_worker(
     common: &Common,
     path: PathBuf,
     rebuild: bool,
+    filter: ConversationFilter,
+    order: BrowseOrder,
+    page_size: usize,
     sender: &SyncSender<WorkerEvent>,
 ) -> Result<(), String> {
     sender
@@ -394,12 +427,7 @@ fn refresh_worker(
     let batch = refresh_batch(&scan, &files, &dbs)?;
     apply_refresh(&mut index, batch, reproject)?;
     let page = index
-        .browse_ordered(
-            &ConversationFilter::default(),
-            None,
-            25,
-            BrowseOrder::default(),
-        )
+        .browse_ordered(&filter, None, page_size, order)
         .map_err(|e| e.to_string())?;
     sender
         .send(WorkerEvent::Ready(page))
@@ -537,7 +565,9 @@ fn map_event(e: TerminalEvent, app: &App) -> Option<Event> {
             KeyCode::Left => Some(Event::ScrollLeft),
             KeyCode::Right => Some(Event::ScrollRight),
             KeyCode::Enter => Some(Event::Enter),
-            KeyCode::Esc | KeyCode::Backspace => Some(Event::Back),
+            KeyCode::Esc => Some(Event::Back),
+            KeyCode::Backspace if app.search_editing() => Some(Event::Key('\u{8}')),
+            KeyCode::Backspace => Some(Event::Back),
             KeyCode::Tab if k.modifiers.contains(KeyModifiers::SHIFT) => Some(Event::BackTab),
             KeyCode::Tab => Some(Event::Tab),
             KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1173,6 +1203,21 @@ mod tests {
         assert_eq!(
             key(KeyCode::Char('d'), KeyModifiers::CONTROL),
             Some(Event::PageDown)
+        );
+    }
+
+    #[test]
+    fn backspace_edits_search_before_it_becomes_navigation() {
+        use crossterm::event::KeyEvent;
+        let mut app = App::new(Preferences::default());
+        app.update(Event::Key('/'));
+        app.update(Event::Key('x'));
+        assert_eq!(
+            map_event(
+                TerminalEvent::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+                &app,
+            ),
+            Some(Event::Key('\u{8}'))
         );
     }
 
