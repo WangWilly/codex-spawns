@@ -118,6 +118,7 @@ pub struct Preferences {
     pub pane_width_percent: u16,
     pub color: bool,
     pub sensitive_content_acknowledged: bool,
+    pub title_width: usize,
 }
 
 impl Default for Preferences {
@@ -129,6 +130,7 @@ impl Default for Preferences {
             pane_width_percent: 38,
             color: std::env::var_os("NO_COLOR").is_none(),
             sensitive_content_acknowledged: false,
+            title_width: 48,
         }
     }
 }
@@ -136,9 +138,52 @@ impl Default for Preferences {
 impl Preferences {
     /// Minimal persistence format deliberately excludes queries and selections.
     pub fn to_toml_like(&self) -> String {
-        format!("page_size = {}\nfilter = \"{:?}\"\nsort = \"{:?}\"\npane_width_percent = {}\ncolor = {}\nsensitive_content_acknowledged = {}\n",
+        format!("page_size = {}\nfilter = \"{:?}\"\nsort = \"{:?}\"\npane_width_percent = {}\ncolor = {}\nsensitive_content_acknowledged = {}\ntitle_width = {}\n",
             self.page_size, self.filter, self.sort, self.pane_width_percent, self.color,
-            self.sensitive_content_acknowledged)
+            self.sensitive_content_acknowledged, self.title_width)
+    }
+
+    pub fn from_toml_like(value: &str) -> Self {
+        let mut preferences = Self::default();
+        for line in value.lines() {
+            let Some((key, raw)) = line.split_once('=') else {
+                continue;
+            };
+            let raw = raw.trim().trim_matches('"');
+            match key.trim() {
+                "page_size" => preferences.page_size = raw.parse().unwrap_or(preferences.page_size),
+                "filter" => {
+                    preferences.filter = match raw {
+                        "ActiveOnly" => Filter::ActiveOnly,
+                        "ArchivedOnly" => Filter::ArchivedOnly,
+                        _ => Filter::All,
+                    }
+                }
+                "sort" => {
+                    preferences.sort = match raw {
+                        "Title" => Sort::Title,
+                        "Agents" => Sort::Agents,
+                        "Depth" => Sort::Depth,
+                        "State" => Sort::State,
+                        "Profile" => Sort::Profile,
+                        _ => Sort::Updated,
+                    }
+                }
+                "pane_width_percent" => {
+                    preferences.pane_width_percent =
+                        raw.parse().unwrap_or(preferences.pane_width_percent)
+                }
+                "color" => preferences.color = raw.parse().unwrap_or(preferences.color),
+                "sensitive_content_acknowledged" => {
+                    preferences.sensitive_content_acknowledged = raw.parse().unwrap_or(false)
+                }
+                "title_width" => {
+                    preferences.title_width = raw.parse::<usize>().unwrap_or(48).clamp(24, 100)
+                }
+                _ => {}
+            }
+        }
+        preferences
     }
 }
 
@@ -230,6 +275,12 @@ struct NavigationState {
     tree_viewport: Viewport,
     detail_viewport: Viewport,
     help_viewport: Viewport,
+    conversations: Vec<ConversationItem>,
+    next_cursor: Option<String>,
+    approximate_total: Option<usize>,
+    preferences: Preferences,
+    sort_direction: SortDirection,
+    search: String,
 }
 
 #[derive(Debug)]
@@ -478,6 +529,15 @@ impl App {
                 self.scroll_horizontal(true, false);
                 vec![]
             }
+            '[' if self.screen == Screen::Conversations => {
+                self.preferences.title_width =
+                    self.preferences.title_width.saturating_sub(4).max(24);
+                vec![]
+            }
+            ']' if self.screen == Screen::Conversations => {
+                self.preferences.title_width = (self.preferences.title_width + 4).min(100);
+                vec![]
+            }
             'e' => self
                 .selected_agent()
                 .map(|a| {
@@ -509,9 +569,11 @@ impl App {
         if self.sort_overlay {
             return self.apply_sort(self.sort_selection);
         }
-        if let Some(page) = self.pending_snapshot.take() {
-            self.replace_page(page);
-            return vec![];
+        if self.screen == Screen::Conversations {
+            if let Some(page) = self.pending_snapshot.take() {
+                self.replace_page(page);
+                return vec![];
+            }
         }
         match self.screen {
             Screen::Conversations => {
@@ -562,6 +624,12 @@ impl App {
             self.tree_viewport = state.tree_viewport;
             self.detail_viewport = state.detail_viewport;
             self.help_viewport = state.help_viewport;
+            self.conversations = state.conversations;
+            self.next_cursor = state.next_cursor;
+            self.approximate_total = state.approximate_total;
+            self.preferences = state.preferences;
+            self.sort_direction = state.sort_direction;
+            self.search = state.search;
             if self.screen == Screen::Conversations {
                 self.selected_root_id = None;
             }
@@ -638,6 +706,12 @@ impl App {
             tree_viewport: self.tree_viewport,
             detail_viewport: self.detail_viewport,
             help_viewport: self.help_viewport,
+            conversations: self.conversations.clone(),
+            next_cursor: self.next_cursor.clone(),
+            approximate_total: self.approximate_total,
+            preferences: self.preferences.clone(),
+            sort_direction: self.sort_direction,
+            search: self.search.clone(),
         });
     }
     fn active_viewport_mut(&mut self) -> &mut Viewport {

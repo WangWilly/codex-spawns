@@ -397,3 +397,48 @@ fn arrow_mouse_and_destructive_confirmation_are_explicit_events() {
     assert!(app.rebuild_confirmation());
     assert_eq!(app.update(Event::Key('R')), vec![Command::Rebuild]);
 }
+
+#[test]
+fn title_width_is_bounded_and_round_trips_as_a_low_sensitive_preference() {
+    let mut app = App::new(Preferences::default());
+    for _ in 0..20 {
+        app.update(Event::Key('['));
+    }
+    assert_eq!(app.preferences().title_width, 24);
+    for _ in 0..30 {
+        app.update(Event::Key(']'));
+    }
+    assert_eq!(app.preferences().title_width, 100);
+    let decoded = Preferences::from_toml_like(&app.preferences().to_toml_like());
+    assert_eq!(decoded.title_width, 100);
+}
+
+#[test]
+fn pending_refresh_does_not_intercept_enter_inside_a_conversation() {
+    let mut app = App::new(Preferences::default());
+    app.update(Event::ConversationsLoaded(Page {
+        items: vec![conversation("old", "Old")],
+        next_cursor: None,
+        approximate_total: Some(1),
+    }));
+    app.update(Event::Enter);
+    app.update(Event::AgentsLoaded {
+        conversation_id: "old".into(),
+        agents: vec![agent("child", Some("old"), 1, AgentStatus::Spawned)],
+    });
+    app.update(Event::RefreshReady(Page {
+        items: vec![conversation("new", "New")],
+        next_cursor: None,
+        approximate_total: Some(1),
+    }));
+    assert_eq!(
+        app.update(Event::Enter),
+        vec![Command::LoadAgentDetail {
+            agent_id: "child".into()
+        }]
+    );
+    app.update(Event::Back);
+    app.update(Event::Back);
+    assert_eq!(app.selected_conversation().unwrap().id, "old");
+    assert!(app.has_pending_snapshot());
+}

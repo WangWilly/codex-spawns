@@ -90,3 +90,42 @@ fn narrow_table_keeps_title_frozen_and_cues_horizontal_overflow() {
     assert!(output.contains("◀"));
     assert!(output.contains("Rows 1–1 of ~588"));
 }
+
+#[test]
+fn cjk_title_uses_terminal_cell_width_without_shifting_headers() {
+    let mut app = App::new(Preferences {
+        color: false,
+        title_width: 24,
+        ..Preferences::default()
+    });
+    app.update(Event::ConversationsLoaded(Page {
+        items: vec![ConversationItem {
+            id: "cjk".into(),
+            title: "目前的交互是互動模式🙂".into(),
+            cwd: "/repo".into(),
+            last_activity_at: "2026-08-13T14:32:00Z".into(),
+            archived: false,
+            agent_count: 3,
+            max_depth: 2,
+            profile_complete: true,
+            title_source: "user message".into(),
+            state: "active".into(),
+            profile: "complete".into(),
+        }],
+        next_cursor: None,
+        approximate_total: Some(1),
+    }));
+    let backend = TestBackend::new(100, 18);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let row = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(row.contains('目'));
+    assert!(row.contains('互'));
+    assert!(row.contains("Updated↓"));
+}

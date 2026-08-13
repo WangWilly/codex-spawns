@@ -7,8 +7,8 @@ use ratatui::{
 };
 
 use super::{AgentStatus, App, Focus, Screen, Sort, SortDirection};
-
-const TITLE_WIDTH: usize = 48;
+use chrono::{DateTime, Local};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let chunks = Layout::default()
@@ -52,7 +52,7 @@ fn render_conversations(frame: &mut Frame<'_>, app: &App, area: Rect) {
             "Title",
             app.preferences().sort == Sort::Title,
             arrow,
-            TITLE_WIDTH,
+            app.preferences().title_width,
         ),
         header(
             "Updated",
@@ -85,7 +85,7 @@ fn render_conversations(frame: &mut Frame<'_>, app: &App, area: Rect) {
         } else {
             " "
         };
-        let title = fit(&item.title, TITLE_WIDTH);
+        let title = fit(&item.title, app.preferences().title_width);
         let rest = format!(
             "{:<16} {:>6} {:>5} {:<9} {:<10} {:<12}",
             display_time(&item.last_activity_at),
@@ -255,18 +255,24 @@ fn render_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
         values.push("Loading agent tree…".into());
     }
     let viewport = app.detail_viewport();
-    let lines = values
-        .into_iter()
-        .skip(viewport.row)
-        .map(|v| {
-            if app.detail_wrap() {
-                v
-            } else {
-                horizontal_slice(&v, viewport.column, area.width.saturating_sub(2) as usize)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let lines = if app.detail_wrap() {
+        values
+            .into_iter()
+            .flat_map(|v| wrap_display(&v, inner_width))
+            .skip(viewport.row)
+            .take(area.height.saturating_sub(2) as usize)
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        values
+            .into_iter()
+            .skip(viewport.row)
+            .map(|v| horizontal_slice(&v, viewport.column, inner_width))
+            .take(area.height.saturating_sub(2) as usize)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     let focus = if app.focus() == Focus::Detail {
         " *"
     } else {
@@ -366,12 +372,21 @@ fn header(name: &str, selected: bool, arrow: &str, width: usize) -> String {
     )
 }
 fn fit(value: &str, width: usize) -> String {
-    let mut s: String = value.chars().take(width).collect();
-    if value.chars().count() > width && width > 0 {
-        s.pop();
+    if width == 0 {
+        return String::new();
+    }
+    let truncated = UnicodeWidthStr::width(value) > width;
+    let target = if truncated {
+        width.saturating_sub(1)
+    } else {
+        width
+    };
+    let mut s = horizontal_slice(value, 0, target);
+    if truncated {
         s.push('…');
     }
-    format!("{s:<width$}")
+    s.push_str(&" ".repeat(width.saturating_sub(UnicodeWidthStr::width(s.as_str()))));
+    s
 }
 fn short_id(id: &str) -> String {
     id.chars().take(12).collect()
@@ -380,26 +395,61 @@ fn display_time(value: &str) -> String {
     if value.is_empty() {
         "—".into()
     } else {
-        value
-            .replace('T', " ")
-            .trim_end_matches('Z')
-            .chars()
-            .take(16)
-            .collect()
+        DateTime::parse_from_rfc3339(value)
+            .map(|time| {
+                time.with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_else(|_| fit(value, 16).trim_end().to_owned())
     }
 }
 fn horizontal_slice(value: &str, offset: usize, width: usize) -> String {
-    value.chars().skip(offset).take(width).collect()
+    let mut passed = 0;
+    let mut used = 0;
+    let mut result = String::new();
+    for ch in value.chars() {
+        let cells = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if passed + cells <= offset || passed < offset {
+            passed += cells;
+            continue;
+        }
+        if used + cells > width {
+            break;
+        }
+        used += cells;
+        result.push(ch);
+    }
+    result
 }
 fn table_line(marker: &str, title: &str, rest: &str, offset: usize, width: usize) -> String {
     let frozen = format!("{marker} {title} ");
-    let available = width.saturating_sub(frozen.chars().count() + 2);
+    let available = width.saturating_sub(UnicodeWidthStr::width(frozen.as_str()) + 2);
     let left = if offset > 0 { "◀" } else { " " };
     let mut moving = horizontal_slice(rest, offset, available.saturating_sub(2));
-    if rest.chars().count() > offset + moving.chars().count() {
+    if UnicodeWidthStr::width(rest) > offset + UnicodeWidthStr::width(moving.as_str()) {
         moving.push('▶');
     }
     format!("{frozen}{left}{moving}")
+}
+fn wrap_display(value: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut cells = 0;
+    for ch in value.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if cells + w > width && !current.is_empty() {
+            result.push(std::mem::take(&mut current));
+            cells = 0;
+        }
+        current.push(ch);
+        cells += w;
+    }
+    result.push(current);
+    result
 }
 fn styled(text: String, selected: bool, color: bool) -> Line<'static> {
     let style = if selected {
