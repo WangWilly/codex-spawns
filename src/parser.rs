@@ -248,6 +248,17 @@ pub fn scan_sources(
         }
     }
     for agent in &result.agent_sessions {
+        if let Some(attempt) = result.spawn_attempts.iter_mut().find(|attempt| {
+            attempt.child_thread_id.is_none()
+                && attempt.parent_thread_id == agent.parent_thread_id.value
+                && names_match(
+                    attempt.task_name.value.as_deref(),
+                    agent.agent_path.value.as_deref(),
+                )
+        }) {
+            merge_child(attempt, agent);
+            continue;
+        }
         if !result
             .spawn_attempts
             .iter()
@@ -260,6 +271,27 @@ pub fn scan_sources(
         merge_state(db, &mut result)?;
     }
     Ok(result)
+}
+
+fn names_match(task_name: Option<&str>, agent_path: Option<&str>) -> bool {
+    match (task_name, agent_path) {
+        (Some(task), Some(path)) => task == path || path.rsplit('/').next() == Some(task),
+        _ => false,
+    }
+}
+
+fn merge_child(attempt: &mut SpawnAttempt, child: &AgentSession) {
+    attempt.child_thread_id = Some(child.id.clone());
+    attempt.status = SpawnStatus::Spawned;
+    attempt.effective_model = child.model.clone();
+    attempt.effective_effort = child.effort.clone();
+    attempt.agent_role = child.agent_role.clone();
+    attempt.agent_nickname = child.agent_nickname.clone();
+    attempt.agent_path = child.agent_path.clone();
+    attempt.depth = child.depth.clone();
+    attempt
+        .evidence
+        .extend(child.parent_thread_id.provenance.clone());
 }
 
 fn update_session(m: &mut Meta, p: &Map<String, Value>, line: u64) {
