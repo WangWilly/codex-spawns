@@ -47,34 +47,43 @@ fn render_conversations(frame: &mut Frame<'_>, app: &App, area: Rect) {
         SortDirection::Ascending => "↑",
         SortDirection::Descending => "↓",
     };
+    let title_width = frozen_title_width(app.root_title_width(), area.width as usize);
     let headers = [
         header(
             "Title",
             app.preferences().sort == Sort::Title,
             arrow,
-            app.preferences().title_width,
+            title_width,
         ),
+        header(
+            "Project",
+            app.preferences().sort == Sort::Project,
+            arrow,
+            18,
+        ),
+        header("Tokens", app.preferences().sort == Sort::Tokens, arrow, 10),
         header(
             "Updated",
             app.preferences().sort == Sort::Updated,
             arrow,
             16,
         ),
-        header("Agents", app.preferences().sort == Sort::Agents, arrow, 6),
-        header("Depth", app.preferences().sort == Sort::Depth, arrow, 5),
-        header("State", app.preferences().sort == Sort::State, arrow, 9),
+        header("State", app.preferences().sort == Sort::State, arrow, 10),
         header(
             "Profile",
             app.preferences().sort == Sort::Profile,
             arrow,
             10,
         ),
-        format!("{:<12}", "ID"),
+        header("Agents", app.preferences().sort == Sort::Agents, arrow, 6),
+        header("Depth", app.preferences().sort == Sort::Depth, arrow, 5),
+        header("Model", false, arrow, 14),
+        header("ID", false, arrow, 12),
     ];
     let mut lines = vec![Line::from(table_line(
         " ",
         &headers[0],
-        &headers[1..].join(" "),
+        &headers[1..].join(" | "),
         viewport.column,
         area.width as usize,
     ))];
@@ -85,16 +94,19 @@ fn render_conversations(frame: &mut Frame<'_>, app: &App, area: Rect) {
         } else {
             " "
         };
-        let title = fit(&item.title, app.preferences().title_width);
-        let rest = format!(
-            "{:<16} {:>6} {:>5} {:<9} {:<10} {:<12}",
-            display_time(&item.last_activity_at),
-            item.agent_count,
-            item.max_depth,
-            item.state,
-            item.profile,
-            short_id(&item.id)
-        );
+        let title = fit(&item.title, title_width);
+        let rest = [
+            fit(item.project.name(), 18),
+            fit(&item.tokens.compact(), 10),
+            fit(&display_time(&item.last_activity_at), 16),
+            fit(&item.state, 10),
+            fit(&item.profile, 10),
+            format!("{:>6}", item.agent_count),
+            format!("{:>5}", item.max_depth),
+            fit(item.model.as_deref().unwrap_or("unknown"), 14),
+            fit(&short_id(&item.id), 12),
+        ]
+        .join(" | ");
         lines.push(styled(
             table_line(marker, &title, &rest, viewport.column, area.width as usize),
             absolute == app.selected_conversation_index(),
@@ -145,6 +157,8 @@ fn render_sort_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let text = [
         Sort::Updated,
         Sort::Title,
+        Sort::Project,
+        Sort::Tokens,
         Sort::Agents,
         Sort::Depth,
         Sort::State,
@@ -165,68 +179,74 @@ fn render_sort_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn render_conversation(frame: &mut Frame<'_>, app: &App, area: Rect, detail_screen: bool) {
-    if app.is_narrow() {
-        if detail_screen {
-            render_detail(frame, app, area)
-        } else {
-            render_tree(frame, app, area)
-        }
-        return;
+    // Agent Table is the browse surface at every terminal width. Details are
+    // deliberately a separate full-screen state entered with Enter/double-click.
+    if detail_screen {
+        render_detail(frame, app, area)
+    } else {
+        render_tree(frame, app, area)
     }
-    let width = app.preferences().pane_width_percent.clamp(20, 70);
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(width),
-            Constraint::Percentage(100 - width),
-        ])
-        .split(area);
-    render_tree(frame, app, panes[0]);
-    render_detail(frame, app, panes[1]);
 }
 
 fn render_tree(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let viewport = app.tree_viewport();
     let height = area.height.saturating_sub(2) as usize;
-    let lines = app
+    let title_width = frozen_title_width(app.agent_title_width(), area.width as usize);
+    let headers = [
+        header("Title", false, "", title_width),
+        header("Agent Name", false, "", 20),
+        header("Nickname", false, "", 14),
+        header("Model", false, "", 14),
+        header("Effort", false, "", 10),
+        header("Role", false, "", 14),
+        header("Status", false, "", 12),
+        header("Tokens", false, "", 10),
+        header("ID", false, "", 12),
+    ];
+    let mut lines = vec![Line::from(table_line(
+        " ",
+        &headers[0],
+        &headers[1..].join(" | "),
+        viewport.column,
+        area.width as usize,
+    ))];
+    for (index, agent) in app
         .visible_agents()
         .iter()
         .enumerate()
         .skip(viewport.row)
-        .take(height)
-        .map(|(index, agent)| {
-            let branch = if agent.depth == 0 {
-                String::new()
-            } else {
-                format!("{}└─ ", "  ".repeat(agent.depth.saturating_sub(1) as usize))
-            };
-            let marker = if index == app.selected_agent_index() {
-                ">"
-            } else {
-                " "
-            };
-            styled(
-                horizontal_slice(
-                    &format!(
-                        "{marker} {branch}{} {} {}",
-                        agent.task_name,
-                        agent.status.cue(),
-                        agent.id
-                    ),
-                    viewport.column,
-                    area.width.saturating_sub(2) as usize,
-                ),
-                index == app.selected_agent_index(),
-                app.preferences().color,
-            )
-        })
-        .collect::<Vec<_>>();
+        .take(height.saturating_sub(1))
+    {
+        let branch = agent_branch(app.visible_agents(), index);
+        let title = fit(&format!("{branch}{}", agent.title), title_width);
+        let rest = [
+            fit(&agent.task_name, 20),
+            fit(agent.nickname.as_deref().unwrap_or("unknown"), 14),
+            fit(agent.model.as_deref().unwrap_or("unknown"), 14),
+            fit(agent.effort.as_deref().unwrap_or("unknown"), 10),
+            fit(agent.role.as_deref().unwrap_or("unknown"), 14),
+            fit(agent.status.cue(), 12),
+            fit(&agent.tokens.compact(), 10),
+            fit(&short_id(&agent.id), 12),
+        ]
+        .join(" | ");
+        let marker = if index == app.selected_agent_index() {
+            ">"
+        } else {
+            " "
+        };
+        lines.push(styled(
+            table_line(marker, &title, &rest, viewport.column, area.width as usize),
+            index == app.selected_agent_index(),
+            app.preferences().color,
+        ));
+    }
     let focus = if app.focus() == Focus::Tree { " *" } else { "" };
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!("Agent Tree{focus}")),
+                .title(format!("Agent Table{focus}")),
         ),
         area,
     );
@@ -237,9 +257,11 @@ fn render_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if let Some(agent) = app.selected_agent() {
         values.extend([
             format!("{} {}", agent.status.cue(), agent.id),
+            format!("title: {}", agent.title),
             format!("task: {}", agent.task_name),
             format!("parent: {}", agent.parent_id.as_deref().unwrap_or("root")),
             format!("role: {}", agent.role.as_deref().unwrap_or("unknown")),
+            format!("tokens: {}", agent.tokens.compact()),
             format!(
                 "model: {} / effort: {}",
                 agent.model.as_deref().unwrap_or("unknown"),
@@ -370,6 +392,32 @@ fn header(name: &str, selected: bool, arrow: &str, width: usize) -> String {
         &format!("{name}{}", if selected { arrow } else { "" }),
         width,
     )
+}
+
+fn agent_branch(agents: &[super::AgentItem], index: usize) -> String {
+    let agent = &agents[index];
+    if agent.depth == 0 {
+        return String::new();
+    }
+    let has_sibling_after = agents[index + 1..]
+        .iter()
+        .any(|next| next.depth == agent.depth && next.parent_id == agent.parent_id);
+    let glyph = if has_sibling_after {
+        "├─ "
+    } else {
+        "└─ "
+    };
+    format!(
+        "{}{}",
+        "  ".repeat(agent.depth.saturating_sub(1) as usize),
+        glyph
+    )
+}
+
+fn frozen_title_width(preferred: usize, area_width: usize) -> usize {
+    // Keep a meaningful moving viewport even on a narrow terminal: reserve
+    // enough cells for one compact non-title field plus the scroll cues.
+    preferred.min(area_width.saturating_sub(22).max(1))
 }
 fn fit(value: &str, width: usize) -> String {
     if width == 0 {

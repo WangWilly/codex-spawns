@@ -1,5 +1,75 @@
 use std::cmp::min;
 
+fn compact_tokens(value: u64) -> String {
+    const UNITS: [&str; 4] = ["", "K", "M", "B"];
+    let mut scaled = value as f64;
+    let mut unit = 0;
+    while scaled >= 1000.0 && unit < UNITS.len() - 1 {
+        scaled /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        return value.to_string();
+    }
+    let mut rounded = (scaled * 10.0).round() / 10.0;
+    if rounded >= 1000.0 && unit < UNITS.len() - 1 {
+        scaled = rounded / 1000.0;
+        unit += 1;
+        rounded = (scaled * 10.0).round() / 10.0;
+    }
+    if rounded.fract() == 0.0 {
+        format!("{rounded:.0}{}", UNITS[unit])
+    } else {
+        format!("{rounded:.1}{}", UNITS[unit])
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TokenDisplay {
+    Exact(u64),
+    LowerBound(u64),
+    #[default]
+    Unknown,
+}
+
+impl TokenDisplay {
+    pub fn compact(self) -> String {
+        match self {
+            Self::Exact(value) => compact_tokens(value),
+            Self::LowerBound(value) => format!("≥{}", compact_tokens(value)),
+            Self::Unknown => "unknown".into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ProjectDisplay {
+    Assigned {
+        id: String,
+        name: String,
+    },
+    NoProject,
+    #[default]
+    Unknown,
+}
+
+impl ProjectDisplay {
+    pub fn id(&self) -> Option<&str> {
+        match self {
+            Self::Assigned { id, .. } => Some(id),
+            Self::NoProject | Self::Unknown => None,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Assigned { name, .. } => name,
+            Self::NoProject => "No Project",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConversationItem {
     pub id: String,
@@ -13,6 +83,9 @@ pub struct ConversationItem {
     pub title_source: String,
     pub state: String,
     pub profile: String,
+    pub project: ProjectDisplay,
+    pub tokens: TokenDisplay,
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,11 +118,13 @@ pub struct AgentItem {
     pub depth: u32,
     pub status: AgentStatus,
     pub task_name: String,
+    pub title: String,
     pub role: Option<String>,
     pub nickname: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub detail_loaded: bool,
+    pub tokens: TokenDisplay,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +165,8 @@ pub enum Focus {
 pub enum Sort {
     Updated,
     Title,
+    Project,
+    Tokens,
     Agents,
     Depth,
     State,
@@ -119,6 +196,8 @@ pub struct Preferences {
     pub color: bool,
     pub sensitive_content_acknowledged: bool,
     pub title_width: usize,
+    pub root_title_width: usize,
+    pub agent_title_width: usize,
 }
 
 impl Default for Preferences {
@@ -131,6 +210,8 @@ impl Default for Preferences {
             color: std::env::var_os("NO_COLOR").is_none(),
             sensitive_content_acknowledged: false,
             title_width: 48,
+            root_title_width: 48,
+            agent_title_width: 36,
         }
     }
 }
@@ -138,9 +219,10 @@ impl Default for Preferences {
 impl Preferences {
     /// Minimal persistence format deliberately excludes queries and selections.
     pub fn to_toml_like(&self) -> String {
-        format!("page_size = {}\nfilter = \"{:?}\"\nsort = \"{:?}\"\npane_width_percent = {}\ncolor = {}\nsensitive_content_acknowledged = {}\ntitle_width = {}\n",
+        format!("page_size = {}\nfilter = \"{:?}\"\nsort = \"{:?}\"\npane_width_percent = {}\ncolor = {}\nsensitive_content_acknowledged = {}\ntitle_width = {}\nroot_title_width = {}\nagent_title_width = {}\n",
             self.page_size, self.filter, self.sort, self.pane_width_percent, self.color,
-            self.sensitive_content_acknowledged, self.title_width)
+            self.sensitive_content_acknowledged, self.title_width, self.root_title_width,
+            self.agent_title_width)
     }
 
     pub fn from_toml_like(value: &str) -> Self {
@@ -162,6 +244,8 @@ impl Preferences {
                 "sort" => {
                     preferences.sort = match raw {
                         "Title" => Sort::Title,
+                        "Project" => Sort::Project,
+                        "Tokens" => Sort::Tokens,
                         "Agents" => Sort::Agents,
                         "Depth" => Sort::Depth,
                         "State" => Sort::State,
@@ -179,6 +263,13 @@ impl Preferences {
                 }
                 "title_width" => {
                     preferences.title_width = raw.parse::<usize>().unwrap_or(48).clamp(24, 100)
+                }
+                "root_title_width" => {
+                    preferences.root_title_width = raw.parse::<usize>().unwrap_or(48).clamp(24, 100)
+                }
+                "agent_title_width" => {
+                    preferences.agent_title_width =
+                        raw.parse::<usize>().unwrap_or(36).clamp(24, 100)
                 }
                 _ => {}
             }
@@ -212,6 +303,14 @@ pub enum Event {
     BackTab,
     ClearSearch,
     MouseSelect {
+        index: usize,
+    },
+    /// A single click only moves the row cursor; opening is an explicit action.
+    MouseDoubleClick {
+        index: usize,
+    },
+    /// Alias used by terminal adapters that report a semantic open gesture.
+    MouseOpen {
         index: usize,
     },
     Resize {
@@ -281,6 +380,7 @@ struct NavigationState {
     preferences: Preferences,
     sort_direction: SortDirection,
     search: String,
+    detail_wrap: bool,
 }
 
 #[derive(Debug)]
@@ -360,7 +460,7 @@ impl App {
                 conversation_id,
                 agents,
             } if self.selected_root_id.as_deref() == Some(&conversation_id) => {
-                self.agents = agents;
+                self.agents = self.normalize_agents(agents);
                 self.agent_selection = 0;
             }
             Event::AgentsLoaded { .. } => {}
@@ -407,6 +507,24 @@ impl App {
                 }
                 Screen::Help => {}
             },
+            Event::MouseDoubleClick { index } | Event::MouseOpen { index } => {
+                match self.screen {
+                    Screen::Conversations => {
+                        self.conversation_selection =
+                            min(index, self.visible_conversations().len().saturating_sub(1));
+                        Self::follow_selection(
+                            self.conversation_selection,
+                            &mut self.conversation_viewport,
+                        );
+                    }
+                    Screen::Conversation | Screen::AgentDetail => {
+                        self.agent_selection = min(index, self.agents.len().saturating_sub(1));
+                        Self::follow_selection(self.agent_selection, &mut self.tree_viewport);
+                    }
+                    Screen::Help => {}
+                }
+                return self.enter();
+            }
             Event::Down if self.sort_overlay => self.move_sort_selection(true),
             Event::Down => return self.move_down(),
             Event::Up if self.sort_overlay => self.move_sort_selection(false),
@@ -532,10 +650,12 @@ impl App {
             '[' if self.screen == Screen::Conversations => {
                 self.preferences.title_width =
                     self.preferences.title_width.saturating_sub(4).max(24);
+                self.preferences.root_title_width = self.preferences.title_width;
                 vec![]
             }
             ']' if self.screen == Screen::Conversations => {
                 self.preferences.title_width = (self.preferences.title_width + 4).min(100);
+                self.preferences.root_title_width = self.preferences.title_width;
                 vec![]
             }
             'e' => self
@@ -630,6 +750,7 @@ impl App {
             self.preferences = state.preferences;
             self.sort_direction = state.sort_direction;
             self.search = state.search;
+            self.detail_wrap = state.detail_wrap;
             if self.screen == Screen::Conversations {
                 self.selected_root_id = None;
             }
@@ -712,6 +833,7 @@ impl App {
             preferences: self.preferences.clone(),
             sort_direction: self.sort_direction,
             search: self.search.clone(),
+            detail_wrap: self.detail_wrap,
         });
     }
     fn active_viewport_mut(&mut self) -> &mut Viewport {
@@ -849,9 +971,11 @@ impl App {
         }]
     }
     fn move_sort_selection(&mut self, down: bool) {
-        const SORTS: [Sort; 6] = [
+        const SORTS: [Sort; 8] = [
             Sort::Updated,
             Sort::Title,
+            Sort::Project,
+            Sort::Tokens,
             Sort::Agents,
             Sort::Depth,
             Sort::State,
@@ -873,6 +997,92 @@ impl App {
         self.next_cursor = page.next_cursor;
         self.approximate_total = page.approximate_total;
         self.conversation_selection = 0;
+    }
+
+    fn normalize_agents(&self, mut agents: Vec<AgentItem>) -> Vec<AgentItem> {
+        let Some(root_id) = self.selected_root_id.as_deref() else {
+            return agents;
+        };
+        let conversation = self.conversations.iter().find(|item| item.id == root_id);
+
+        // Keep the catalog's stable order within each sibling group while making
+        // the parent-first relationship explicit for the table. A malformed
+        // cycle or missing parent is still rendered, never silently dropped.
+        for agent in &mut agents {
+            if agent.title.trim().is_empty() {
+                agent.title = agent.task_name.clone();
+            }
+        }
+        let root_position = agents.iter().position(|agent| agent.id == root_id);
+        if let Some(position) = root_position {
+            let mut root = agents.remove(position);
+            root.depth = 0;
+            root.parent_id = None;
+            root.task_name = "root conversation".into();
+            root.title = conversation
+                .map(|item| item.title.clone())
+                .unwrap_or_else(|| "root conversation".into());
+            root.model = conversation.and_then(|item| item.model.clone());
+            root.tokens = conversation.map(|item| item.tokens).unwrap_or_default();
+            agents.insert(0, root);
+        } else {
+            agents.insert(
+                0,
+                AgentItem {
+                    id: root_id.into(),
+                    parent_id: None,
+                    depth: 0,
+                    status: AgentStatus::StateOnly,
+                    task_name: "root conversation".into(),
+                    title: conversation
+                        .map(|item| item.title.clone())
+                        .unwrap_or_else(|| "root conversation".into()),
+                    role: Some("root".into()),
+                    nickname: None,
+                    model: conversation.and_then(|item| item.model.clone()),
+                    effort: None,
+                    detail_loaded: false,
+                    tokens: conversation.map(|item| item.tokens).unwrap_or_default(),
+                },
+            );
+        }
+
+        let mut ordered = Vec::with_capacity(agents.len());
+        ordered.push(agents.remove(0));
+        let mut emitted = std::collections::HashSet::new();
+        emitted.insert(root_id.to_owned());
+        while !agents.is_empty() {
+            let mut progressed = false;
+            let mut index = 0;
+            while index < agents.len() {
+                let parent_is_ready = agents[index]
+                    .parent_id
+                    .as_deref()
+                    .map(|parent| emitted.contains(parent))
+                    .unwrap_or(true);
+                if parent_is_ready {
+                    let mut agent = agents.remove(index);
+                    agent.depth = agent
+                        .parent_id
+                        .as_deref()
+                        .and_then(|parent| {
+                            ordered.iter().find(|item: &&AgentItem| item.id == parent)
+                        })
+                        .map(|parent| parent.depth + 1)
+                        .unwrap_or(agent.depth);
+                    emitted.insert(agent.id.clone());
+                    ordered.push(agent);
+                    progressed = true;
+                } else {
+                    index += 1;
+                }
+            }
+            if !progressed {
+                // Orphans/cycles retain source order and their evidence status.
+                ordered.append(&mut agents);
+            }
+        }
+        ordered
     }
     fn clamp_selection(&mut self) {
         self.conversation_selection = min(
@@ -938,6 +1148,19 @@ impl App {
     }
     pub fn preferences(&self) -> &Preferences {
         &self.preferences
+    }
+    pub fn root_title_width(&self) -> usize {
+        // `title_width` was the pre-table preference. Honor it when loading an
+        // older preference file while exposing the independent root/agent knobs
+        // to newer callers.
+        if self.preferences.root_title_width == 48 && self.preferences.title_width != 48 {
+            self.preferences.title_width
+        } else {
+            self.preferences.root_title_width
+        }
+    }
+    pub fn agent_title_width(&self) -> usize {
+        self.preferences.agent_title_width
     }
     pub fn conversation_viewport(&self) -> Viewport {
         self.conversation_viewport

@@ -1,6 +1,6 @@
 use codex_spawns::interactive::{
     AgentDetail, AgentItem, AgentStatus, App, Command, ConversationItem, Event, Filter, Focus,
-    Page, Preferences, RefreshProgress, Screen, Sort, SortDirection,
+    Page, Preferences, ProjectDisplay, RefreshProgress, Screen, Sort, SortDirection, TokenDisplay,
 };
 
 fn conversation(id: &str, title: &str) -> ConversationItem {
@@ -16,6 +16,9 @@ fn conversation(id: &str, title: &str) -> ConversationItem {
         title_source: "user message".into(),
         state: "active".into(),
         profile: "complete".into(),
+        project: ProjectDisplay::Unknown,
+        tokens: TokenDisplay::Unknown,
+        model: None,
     }
 }
 
@@ -195,11 +198,13 @@ fn agent(id: &str, parent: Option<&str>, depth: u32, status: AgentStatus) -> Age
         depth,
         status,
         task_name: format!("task-{id}"),
+        title: format!("title-{id}"),
         role: None,
         nickname: None,
         model: None,
         effort: None,
         detail_loaded: false,
+        tokens: TokenDisplay::Unknown,
     }
 }
 
@@ -441,4 +446,73 @@ fn pending_refresh_does_not_intercept_enter_inside_a_conversation() {
     app.update(Event::Back);
     assert_eq!(app.selected_conversation().unwrap().id, "old");
     assert!(app.has_pending_snapshot());
+}
+
+#[test]
+fn typed_profile_values_have_compact_unknown_and_lower_bound_forms() {
+    assert_eq!(TokenDisplay::Exact(12_400).compact(), "12.4K");
+    assert_eq!(TokenDisplay::LowerBound(12_400).compact(), "≥12.4K");
+    assert_eq!(TokenDisplay::Unknown.compact(), "unknown");
+    let project = ProjectDisplay::Assigned {
+        id: "project-1".into(),
+        name: "Payments".into(),
+    };
+    assert_eq!(project.id(), Some("project-1"));
+    assert_eq!(project.name(), "Payments");
+    assert_eq!(ProjectDisplay::NoProject.name(), "No Project");
+}
+
+#[test]
+fn agent_table_is_parent_first_and_double_click_restores_browse_position() {
+    let mut app = App::new(Preferences::default());
+    app.update(Event::ConversationsLoaded(Page {
+        items: vec![conversation("root", "Root")],
+        next_cursor: None,
+        approximate_total: None,
+    }));
+    app.update(Event::Enter);
+    app.update(Event::AgentsLoaded {
+        conversation_id: "root".into(),
+        agents: vec![
+            agent("grandchild", Some("child"), 2, AgentStatus::Complete),
+            agent("child", Some("root"), 1, AgentStatus::Spawned),
+        ],
+    });
+    assert_eq!(
+        app.visible_agents()
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["root", "child", "grandchild"]
+    );
+    app.update(Event::SetViewport {
+        width: 30,
+        height: 2,
+    });
+    app.update(Event::Down);
+    let before = (app.selected_agent_index(), app.tree_viewport());
+    assert_eq!(
+        app.update(Event::MouseDoubleClick { index: 1 }),
+        vec![Command::LoadAgentDetail {
+            agent_id: "child".into()
+        }]
+    );
+    app.update(Event::Key('w'));
+    app.update(Event::ScrollRight);
+    app.update(Event::Back);
+    assert_eq!(app.screen(), Screen::Conversation);
+    assert_eq!((app.selected_agent_index(), app.tree_viewport()), before);
+    assert!(app.detail_wrap());
+}
+
+#[test]
+fn root_and_agent_title_width_preferences_round_trip_independently() {
+    let preferences = Preferences {
+        root_title_width: 28,
+        agent_title_width: 64,
+        ..Preferences::default()
+    };
+    let decoded = Preferences::from_toml_like(&preferences.to_toml_like());
+    assert_eq!(decoded.root_title_width, 28);
+    assert_eq!(decoded.agent_title_width, 64);
 }
