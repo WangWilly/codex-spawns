@@ -48,6 +48,7 @@ fn release_is_tag_gated_draft_and_publishes_complete_bundle() {
         "aarch64-unknown-linux-musl",
         "x86_64-unknown-linux-musl",
         "cargo-zigbuild --version 0.20.1 --locked",
+        "build_command: cargo zigbuild",
         "ziglang==0.13.0",
         "scripts/package-release.sh",
         "SHA256SUMS",

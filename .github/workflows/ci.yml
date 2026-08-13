@@ -51,16 +51,16 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-            builder: cargo
+            build_command: cargo build
           - os: macos-15-intel
             target: x86_64-apple-darwin
-            builder: cargo
+            build_command: cargo build
           - os: ubuntu-24.04
             target: aarch64-unknown-linux-musl
-            builder: cargo-zigbuild
+            build_command: cargo zigbuild
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
-            builder: cargo-zigbuild
+            build_command: cargo zigbuild
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
@@ -78,9 +78,11 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo install cargo-zigbuild --version 0.20.1 --locked
       - name: Build release binary
-        run: ${{ matrix.builder }} build --release --target "${{ matrix.target }}"
-      - name: Smoke test native x86 binary
-        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'x86_64-apple-darwin'
+        run: ${{ matrix.build_command }} --release --target "${{ matrix.target }}"
+      - name: Inspect binary format
+        run: file "target/${{ matrix.target }}/release/codex-spawns"
+      - name: Smoke test native binary
+        if: runner.os == 'macOS' || matrix.target == 'x86_64-unknown-linux-musl'
         run: "target/${{ matrix.target }}/release/codex-spawns --version"
       - name: Package release archive
         env:
