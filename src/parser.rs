@@ -302,6 +302,14 @@ fn update_session(m: &mut Meta, p: &Map<String, Value>, line: u64) {
     if let Some(v) = text(p.get("cwd").or_else(|| p.get("workdir"))) {
         m.cwd = Some((v, line))
     }
+    assign_text(&mut m.model, p.get("model"), line);
+    assign_text(
+        &mut m.effort,
+        p.get("effort")
+            .or_else(|| p.get("reasoning_effort"))
+            .or_else(|| p.get("model_reasoning_effort")),
+        line,
+    );
     let spawn = p
         .get("source")
         .and_then(|v| {
@@ -385,6 +393,11 @@ fn extract_ids(v: &Value) -> Vec<String> {
                     if matches!(k.as_str(), "agent_id" | "child_thread_id" | "thread_id") {
                         if let Some(s) = v.as_str() {
                             o.push(s.into())
+                        }
+                    } else if matches!(k.as_str(), "agent_ids" | "child_thread_ids" | "thread_ids")
+                    {
+                        if let Some(values) = v.as_array() {
+                            o.extend(values.iter().filter_map(Value::as_str).map(String::from));
                         }
                     } else {
                         walk(v, o)
@@ -565,9 +578,9 @@ fn merge_state(path: &Path, result: &mut ScanResult) -> Result<(), ParseError> {
             (child.is_some() && a.child_thread_id == child)
                 || (child.is_none() && a.parent_thread_id == parent)
         }) {
-            a.state_status = status
-                .map(|s| ProfileFact::observed(s, src.clone()))
-                .unwrap_or_else(ProfileFact::unknown);
+            if let Some(status) = status {
+                a.state_status.observe(status, src.clone());
+            }
             a.evidence.push(src)
         } else {
             result.spawn_attempts.push(SpawnAttempt {
