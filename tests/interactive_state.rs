@@ -644,3 +644,31 @@ fn shared_table_layout_reserves_a_scrollable_column_on_narrow_terminals() {
     assert_eq!(root_columns(table_title_width(48, 40))[0].width, 18);
     assert!(agent_columns(table_title_width(48, 40))[1].width > 0);
 }
+
+#[test]
+fn agent_tree_is_depth_first_preorder_for_shuffled_siblings() {
+    let mut app = App::new(Preferences::default());
+    app.update(Event::ConversationsLoaded(Page {
+        items: vec![conversation("root", "Root")],
+        next_cursor: None,
+        approximate_total: None,
+    }));
+    app.update(Event::Enter);
+    let mut b = agent("B", Some("root"), 1, AgentStatus::Spawned);
+    b.title = "B".into();
+    let mut grandchild = agent("grandchild-A", Some("A"), 2, AgentStatus::Complete);
+    grandchild.title = "Grandchild A".into();
+    let mut a = agent("A", Some("root"), 1, AgentStatus::Spawned);
+    a.title = "A".into();
+    app.update(Event::AgentsLoaded {
+        conversation_id: "root".into(),
+        agents: vec![b, grandchild, a],
+    });
+    assert_eq!(
+        app.visible_agents()
+            .iter()
+            .map(|agent| (agent.id.as_str(), agent.depth))
+            .collect::<Vec<_>>(),
+        vec![("root", 0), ("A", 1), ("grandchild-A", 2), ("B", 1)]
+    );
+}

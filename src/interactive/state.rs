@@ -1261,40 +1261,54 @@ impl App {
         }
 
         let mut ordered = Vec::with_capacity(agents.len());
-        ordered.push(agents.remove(0));
-        let mut emitted = std::collections::HashSet::new();
-        emitted.insert(root_id.to_owned());
-        while !agents.is_empty() {
-            let mut progressed = false;
-            let mut index = 0;
-            while index < agents.len() {
-                let parent_is_ready = agents[index]
-                    .parent_id
-                    .as_deref()
-                    .map(|parent| emitted.contains(parent))
-                    .unwrap_or(true);
-                if parent_is_ready {
-                    let mut agent = agents.remove(index);
-                    agent.depth = agent
-                        .parent_id
-                        .as_deref()
-                        .and_then(|parent| {
-                            ordered.iter().find(|item: &&AgentItem| item.id == parent)
-                        })
-                        .map(|parent| parent.depth + 1)
-                        .unwrap_or(agent.depth);
-                    emitted.insert(agent.id.clone());
-                    ordered.push(agent);
-                    progressed = true;
-                } else {
-                    index += 1;
+        let root = agents.remove(0);
+        ordered.push(root);
+
+        // Index each known parent once, then recurse into one sibling group at
+        // a time. This is a true depth-first preorder: a sibling's complete
+        // subtree is emitted before the next sibling, independent of payload
+        // arrival order.
+        let known_ids = agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .chain(std::iter::once(root_id.to_owned()))
+            .collect::<std::collections::HashSet<_>>();
+        let mut children_by_parent = std::collections::HashMap::<String, Vec<AgentItem>>::new();
+        let mut orphan_roots = Vec::new();
+        for agent in agents {
+            match agent.parent_id.as_deref() {
+                Some(parent) if known_ids.contains(parent) => {
+                    children_by_parent
+                        .entry(parent.to_owned())
+                        .or_default()
+                        .push(agent);
                 }
-            }
-            if !progressed {
-                // Orphans/cycles retain source order and their evidence status.
-                ordered.append(&mut agents);
+                _ => orphan_roots.push(agent),
             }
         }
+        emit_agent_children(root_id, 1, &mut children_by_parent, &mut ordered);
+
+        // Missing-parent/state-only rows remain visible after the connected
+        // tree. Preserve any valid descendants of an orphan root, while
+        // leaving malformed cycles as deterministic flat evidence rows.
+        orphan_roots.sort_by_key(agent_order_key);
+        for orphan in orphan_roots {
+            let orphan_id = orphan.id.clone();
+            let depth = orphan.depth;
+            ordered.push(orphan);
+            emit_agent_children(
+                &orphan_id,
+                depth.saturating_add(1),
+                &mut children_by_parent,
+                &mut ordered,
+            );
+        }
+        let mut malformed = children_by_parent
+            .into_values()
+            .flatten()
+            .collect::<Vec<_>>();
+        malformed.sort_by_key(agent_order_key);
+        ordered.extend(malformed);
         ordered
     }
     fn clamp_selection(&mut self) {
@@ -1472,6 +1486,35 @@ fn column_starts(widths: &[usize]) -> Vec<usize> {
         offset += *width + COLUMN_SEPARATOR_WIDTH;
     }
     starts
+}
+
+fn agent_order_key(agent: &AgentItem) -> (String, String, String) {
+    (
+        agent.title.to_lowercase(),
+        agent.task_name.to_lowercase(),
+        agent.id.to_lowercase(),
+    )
+}
+
+fn emit_agent_children(
+    parent_id: &str,
+    depth: u32,
+    children_by_parent: &mut std::collections::HashMap<String, Vec<AgentItem>>,
+    ordered: &mut Vec<AgentItem>,
+) {
+    let mut children = children_by_parent.remove(parent_id).unwrap_or_default();
+    children.sort_by_key(agent_order_key);
+    for mut child in children {
+        let child_id = child.id.clone();
+        child.depth = depth;
+        ordered.push(child);
+        emit_agent_children(
+            &child_id,
+            depth.saturating_add(1),
+            children_by_parent,
+            ordered,
+        );
+    }
 }
 
 fn visible_column_range(offset: usize, capacity: usize, widths: &[usize]) -> (usize, usize) {
