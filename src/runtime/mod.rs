@@ -545,7 +545,7 @@ fn refresh_worker(
         changed_sources(&index, &files, &dbs)?
     };
     let app_candidate = app_ok_candidate(common);
-    let (scan, app_ok) = crate::cli::scan_with_optional_app(
+    let (mut scan, app_ok) = crate::cli::scan_with_optional_app(
         common,
         if app_candidate {
             &files
@@ -554,6 +554,9 @@ fn refresh_worker(
         },
         if app_candidate { &dbs } else { &changed_dbs },
     )?;
+    if app_candidate && !app_ok {
+        scan = crate::cli::scan_with_optional_app(common, &changed_files, &changed_dbs)?.0;
+    }
     sender
         .send(WorkerEvent::Progress {
             scanned: total,
@@ -917,7 +920,7 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
             };
             let paths = crate::cli::app_metadata_paths(common);
             let app_candidate = paths.thread_catalog.exists() && paths.global_state.exists();
-            let (scan, app_ok) = crate::cli::scan_with_optional_app(
+            let (mut scan, app_ok) = crate::cli::scan_with_optional_app(
                 common,
                 if app_candidate {
                     &files
@@ -926,6 +929,9 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
                 },
                 if app_candidate { &dbs } else { &changed_dbs },
             )?;
+            if app_candidate && !app_ok {
+                scan = crate::cli::scan_with_optional_app(common, &changed_files, &changed_dbs)?.0;
+            }
             let mut batch = refresh_batch(&scan, &files, &dbs)?;
             batch.app_metadata_refreshed = app_ok;
             batch.app_metadata_diagnostic = app_metadata_diagnostic(&scan);

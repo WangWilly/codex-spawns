@@ -405,6 +405,23 @@ fn app_failure_without_rollout_changes_retains_enrichment_and_degrades_profile()
         .args(args)
         .assert()
         .success();
+    let initial = ProfileIndex::open(IndexOptions {
+        path: home.path().join("cache/codex-spawns/index.sqlite"),
+    })
+    .unwrap()
+    .profile("01900000-0000-7000-8000-000000000001")
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        initial
+            .conversation
+            .tokens
+            .usage
+            .value
+            .unwrap()
+            .total_tokens,
+        44
+    );
     std::fs::write(&global, "invalid json").unwrap();
     Command::cargo_bin("codex-spawns")
         .unwrap()
