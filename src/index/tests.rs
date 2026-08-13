@@ -212,6 +212,40 @@ fn failed_refresh_rolls_back_the_entire_batch() {
         .is_empty());
 }
 
+#[test]
+fn profile_returns_the_complete_agent_tree_with_excerpts_only() {
+    let (_dir, mut index) = open();
+    let agent = AgentRecord {
+        id: "agent-1".into(),
+        root_id: "root".into(),
+        parent_id: Some("root".into()),
+        agent_path: Some("/root/research".into()),
+        task_name: Some("research".into()),
+        task_excerpt: Some("Inspect the parser".into()),
+        role: Some("explorer".into()),
+        nickname: None,
+        model: Some("gpt-5".into()),
+        effort: Some("high".into()),
+        status: "spawned".into(),
+        depth: 1,
+        evidence_complete: true,
+    };
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![conversation("root", "2026-01-01")],
+                agents: vec![agent.clone()],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    let profile = index.profile("root").unwrap().unwrap();
+    assert_eq!(profile.conversation.title, "Conversation root");
+    assert_eq!(profile.agents, vec![agent]);
+    assert!(index.profile("missing").unwrap().is_none());
+}
+
 #[cfg(unix)]
 #[test]
 fn index_permissions_are_private() {

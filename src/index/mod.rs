@@ -44,6 +44,29 @@ pub struct ConversationRecord {
     pub profile_complete: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentRecord {
+    pub id: String,
+    pub root_id: String,
+    pub parent_id: Option<String>,
+    pub agent_path: Option<String>,
+    pub task_name: Option<String>,
+    pub task_excerpt: Option<String>,
+    pub role: Option<String>,
+    pub nickname: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub status: String,
+    pub depth: u32,
+    pub evidence_complete: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConversationProfile {
+    pub conversation: ConversationRecord,
+    pub agents: Vec<AgentRecord>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConversationFilter {
     pub archived: Option<bool>,
@@ -107,6 +130,7 @@ pub enum RefreshEvent {
 #[derive(Clone, Debug, Default)]
 pub struct RefreshBatch {
     pub conversations: Vec<ConversationRecord>,
+    pub agents: Vec<AgentRecord>,
     pub sources: Vec<SourceRecord>,
     pub discovered_all_sources: bool,
     /// Testable failure injection at the public transaction boundary.
@@ -238,6 +262,46 @@ impl ProfileIndex {
         })
     }
 
+    pub fn profile(&self, root_id: &str) -> Result<Option<ConversationProfile>, IndexError> {
+        let conversation = self
+            .conn
+            .query_row(
+                "SELECT id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete FROM conversations WHERE id=?1",
+                [root_id],
+                row_to_conversation,
+            )
+            .optional()?;
+        let Some(conversation) = conversation else {
+            return Ok(None);
+        };
+        let mut statement = self.conn.prepare(
+            "SELECT id,root_id,parent_id,agent_path,task_name,task_excerpt,role,nickname,model,effort,status,depth,evidence_complete FROM agents WHERE root_id=?1 ORDER BY depth,id",
+        )?;
+        let agents = statement
+            .query_map([root_id], |row| {
+                Ok(AgentRecord {
+                    id: row.get(0)?,
+                    root_id: row.get(1)?,
+                    parent_id: row.get(2)?,
+                    agent_path: row.get(3)?,
+                    task_name: row.get(4)?,
+                    task_excerpt: row.get(5)?,
+                    role: row.get(6)?,
+                    nickname: row.get(7)?,
+                    model: row.get(8)?,
+                    effort: row.get(9)?,
+                    status: row.get(10)?,
+                    depth: row.get(11)?,
+                    evidence_complete: row.get(12)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(ConversationProfile {
+            conversation,
+            agents,
+        }))
+    }
+
     pub fn prune_missing(&mut self, missing_before: i64) -> Result<usize, IndexError> {
         Ok(self.conn.execute(
             "DELETE FROM sources WHERE missing=1 AND missing_since <= ?1",
@@ -260,6 +324,13 @@ fn apply_batch<F: FnMut(RefreshEvent)>(
         tx.execute("INSERT INTO conversations VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
           ON CONFLICT(id) DO UPDATE SET title=excluded.title,title_source=excluded.title_source,cwd=excluded.cwd,created_at=excluded.created_at,last_activity_at=excluded.last_activity_at,archived=excluded.archived,model=excluded.model,status=excluded.status,agent_count=excluded.agent_count,max_depth=excluded.max_depth,profile_complete=excluded.profile_complete,indexed_generation=excluded.indexed_generation",
           params![c.id,c.title,c.title_source,c.cwd,c.created_at,c.last_activity_at,c.archived,c.model,c.status,c.agent_count,c.max_depth,c.profile_complete,generation])?;
+    }
+    for agent in &batch.agents {
+        tx.execute(
+            "INSERT INTO agents VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+             ON CONFLICT(id) DO UPDATE SET root_id=excluded.root_id,parent_id=excluded.parent_id,agent_path=excluded.agent_path,task_name=excluded.task_name,task_excerpt=excluded.task_excerpt,role=excluded.role,nickname=excluded.nickname,model=excluded.model,effort=excluded.effort,status=excluded.status,depth=excluded.depth,evidence_complete=excluded.evidence_complete",
+            params![agent.id,agent.root_id,agent.parent_id,agent.agent_path,agent.task_name,agent.task_excerpt,agent.role,agent.nickname,agent.model,agent.effort,agent.status,agent.depth,agent.evidence_complete],
+        )?;
     }
     for s in &batch.sources {
         tx.execute("INSERT INTO sources(logical_id,canonical_path,size,modified_ns,fingerprint,safe_offset,archived,missing,missing_since) VALUES(?1,?2,?3,?4,?5,?6,?7,0,NULL)
@@ -323,6 +394,8 @@ fn set_file_permissions(_: &Path) -> std::io::Result<()> {
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,title TEXT NOT NULL,title_source TEXT NOT NULL,cwd TEXT NOT NULL,created_at TEXT NOT NULL,last_activity_at TEXT NOT NULL,archived INTEGER NOT NULL,model TEXT,status TEXT,agent_count INTEGER NOT NULL,max_depth INTEGER NOT NULL,profile_complete INTEGER NOT NULL,indexed_generation INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS conversation_browse ON conversations(last_activity_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY,root_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,parent_id TEXT,agent_path TEXT,task_name TEXT,task_excerpt TEXT,role TEXT,nickname TEXT,model TEXT,effort TEXT,status TEXT NOT NULL,depth INTEGER NOT NULL,evidence_complete INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS agents_by_root ON agents(root_id,depth,id);
 CREATE TABLE IF NOT EXISTS sources(logical_id TEXT PRIMARY KEY,canonical_path TEXT NOT NULL UNIQUE,size INTEGER NOT NULL,modified_ns INTEGER NOT NULL,fingerprint TEXT NOT NULL,safe_offset INTEGER NOT NULL,archived INTEGER NOT NULL,missing INTEGER NOT NULL DEFAULT 0,missing_since INTEGER);
 "#;
 
