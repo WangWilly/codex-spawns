@@ -10,6 +10,9 @@ pub struct ConversationItem {
     pub agent_count: usize,
     pub max_depth: u32,
     pub profile_complete: bool,
+    pub title_source: String,
+    pub state: String,
+    pub profile: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

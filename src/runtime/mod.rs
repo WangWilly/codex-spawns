@@ -1,8 +1,9 @@
 use crate::cli::{Common, IndexAction};
 use codex_spawns::{
     index::{
-        AgentRecord, ConversationFilter, ConversationRecord, IndexOptions, ProfileIndex,
-        RefreshBatch, SourceRecord,
+        AgentRecord, BrowseOrder, ConversationFilter, ConversationRecord, ConversationState,
+        IndexOptions, ProfileIndex, ProfileQuality, RefreshBatch,
+        SortDirection as IndexSortDirection, SortField, SourceRecord,
     },
     interactive::{self, App, Command, Event, Page, Preferences},
     ScanResult, SpawnStatus,
@@ -83,7 +84,12 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
     let index =
         ProfileIndex::open(IndexOptions { path: path.clone() }).map_err(|e| e.to_string())?;
     let page = index
-        .browse(&ConversationFilter::default(), None, 25)
+        .browse_ordered(
+            &ConversationFilter::default(),
+            None,
+            25,
+            BrowseOrder::default(),
+        )
         .map_err(|e| e.to_string())?;
     let mut app = App::new(Preferences::default());
     app.update(Event::ConversationsLoaded(to_page(page)));
@@ -102,7 +108,7 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
             .draw(|f| interactive::render(f, &app))
             .map_err(|e| e.to_string())?;
         if event::poll(Duration::from_millis(100)).map_err(|e| e.to_string())? {
-            if let Some(input) = map_event(event::read().map_err(|e| e.to_string())?) {
+            if let Some(input) = map_event(event::read().map_err(|e| e.to_string())?, &app) {
                 for command in app.update(input) {
                     match command {
                         Command::Quit => {
@@ -114,16 +120,22 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                             let cursor = codex_spawns::index::BrowseCursor::decode(&cursor)
                                 .map_err(|e| e.to_string())?;
                             let page = index
-                                .browse(&ConversationFilter::default(), Some(&cursor), 25)
+                                .browse_ordered(
+                                    &ConversationFilter::default(),
+                                    Some(&cursor),
+                                    25,
+                                    app_browse_order(&app),
+                                )
                                 .map_err(|e| e.to_string())?;
                             app.update(Event::MoreConversationsLoaded(to_page(page)));
                         }
                         Command::Search { query, filter } => {
                             let page = index
-                                .browse(
+                                .browse_ordered(
                                     &browse_filter(filter, query),
                                     None,
                                     app.preferences().page_size,
+                                    app_browse_order(&app),
                                 )
                                 .map_err(|e| e.to_string())?;
                             app.update(Event::ConversationsLoaded(to_page(page)));
@@ -180,6 +192,17 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                         Command::Rebuild if refresh.is_none() => {
                             refresh = Some(start_refresh(common.clone(), path.clone(), true));
                         }
+                        Command::Sort { .. } => {
+                            let page = index
+                                .browse_ordered(
+                                    &browse_filter(app.filter(), app.search().to_owned()),
+                                    None,
+                                    app.preferences().page_size,
+                                    app_browse_order(&app),
+                                )
+                                .map_err(|e| e.to_string())?;
+                            app.update(Event::ConversationsLoaded(to_page(page)));
+                        }
                         _ => {}
                     }
                 }
@@ -198,6 +221,24 @@ fn browse_filter(filter: codex_spawns::interactive::Filter, query: String) -> Co
         },
         query: (!query.is_empty()).then_some(query),
         ..Default::default()
+    }
+}
+
+fn app_browse_order(app: &App) -> BrowseOrder {
+    use codex_spawns::interactive::{Sort, SortDirection};
+    BrowseOrder {
+        field: match app.preferences().sort {
+            Sort::Updated => SortField::Updated,
+            Sort::Title => SortField::Title,
+            Sort::Agents => SortField::Agents,
+            Sort::Depth => SortField::Depth,
+            Sort::State => SortField::State,
+            Sort::Profile => SortField::Profile,
+        },
+        direction: match app.sort_direction() {
+            SortDirection::Ascending => IndexSortDirection::Asc,
+            SortDirection::Descending => IndexSortDirection::Desc,
+        },
     }
 }
 
@@ -412,46 +453,131 @@ fn status(s: &str) -> codex_spawns::interactive::AgentStatus {
 fn to_page(
     p: codex_spawns::index::BrowsePage,
 ) -> Page<codex_spawns::interactive::ConversationItem> {
+    let semantics = p.semantics;
     Page {
         items: p
             .conversations
             .into_iter()
-            .map(|c| codex_spawns::interactive::ConversationItem {
-                id: c.id,
-                title: c.title,
-                cwd: c.cwd,
-                last_activity_at: c.last_activity_at,
-                archived: c.archived,
-                agent_count: c.agent_count as usize,
-                max_depth: c.max_depth,
-                profile_complete: c.profile_complete,
+            .map(|c| {
+                let semantic = semantics.get(&c.id).copied().unwrap_or((
+                    if c.archived {
+                        ConversationState::Archived
+                    } else {
+                        ConversationState::Active
+                    },
+                    if c.profile_complete {
+                        ProfileQuality::Complete
+                    } else {
+                        ProfileQuality::Partial
+                    },
+                ));
+                codex_spawns::interactive::ConversationItem {
+                    id: c.id,
+                    title: c.title,
+                    title_source: c.title_source,
+                    cwd: c.cwd,
+                    last_activity_at: c.last_activity_at,
+                    archived: c.archived,
+                    agent_count: c.agent_count as usize,
+                    max_depth: c.max_depth,
+                    profile_complete: c.profile_complete,
+                    state: conversation_state_label(semantic.0).into(),
+                    profile: profile_quality_label(semantic.1).into(),
+                }
             })
             .collect(),
         next_cursor: p.next_cursor.map(|c| c.encode()),
         approximate_total: None,
     }
 }
-fn map_event(e: TerminalEvent) -> Option<Event> {
+
+fn conversation_state_label(state: ConversationState) -> &'static str {
+    match state {
+        ConversationState::Active => "active",
+        ConversationState::Archived => "archived",
+        ConversationState::Missing => "missing",
+    }
+}
+
+fn profile_quality_label(quality: ProfileQuality) -> &'static str {
+    match quality {
+        ProfileQuality::Complete => "complete",
+        ProfileQuality::Partial => "partial",
+        ProfileQuality::Conflicting => "conflict",
+        ProfileQuality::Updating => "updating",
+        ProfileQuality::Error => "error",
+    }
+}
+fn map_event(e: TerminalEvent, app: &App) -> Option<Event> {
     match e {
         TerminalEvent::Resize(width, height) => Some(Event::Resize { width, height }),
         TerminalEvent::Key(k) if k.kind == KeyEventKind::Press => match k.code {
             KeyCode::Up => Some(Event::Up),
             KeyCode::Down => Some(Event::Down),
+            KeyCode::PageUp => Some(Event::PageUp),
+            KeyCode::PageDown => Some(Event::PageDown),
+            KeyCode::Home => Some(Event::Home),
+            KeyCode::End => Some(Event::End),
+            KeyCode::Left if k.modifiers.contains(KeyModifiers::SHIFT) => {
+                Some(Event::ScrollLeftPage)
+            }
+            KeyCode::Right if k.modifiers.contains(KeyModifiers::SHIFT) => {
+                Some(Event::ScrollRightPage)
+            }
+            KeyCode::Left => Some(Event::ScrollLeft),
+            KeyCode::Right => Some(Event::ScrollRight),
             KeyCode::Enter => Some(Event::Enter),
             KeyCode::Esc | KeyCode::Backspace => Some(Event::Back),
             KeyCode::Tab if k.modifiers.contains(KeyModifiers::SHIFT) => Some(Event::BackTab),
             KeyCode::Tab => Some(Event::Tab),
+            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Event::PageUp)
+            }
+            KeyCode::Char('d') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Event::PageDown)
+            }
             KeyCode::Char(c) => Some(Event::Key(c)),
             _ => None,
         },
         TerminalEvent::Mouse(mouse) => match mouse.kind {
             MouseEventKind::ScrollUp => Some(Event::Up),
             MouseEventKind::ScrollDown => Some(Event::Down),
-            MouseEventKind::Down(_) => Some(Event::MouseSelect {
-                index: mouse.row.saturating_sub(2) as usize,
-            }),
+            MouseEventKind::Down(_) => mouse_event(app, mouse.column, mouse.row),
             _ => None,
         },
+        _ => None,
+    }
+}
+
+fn mouse_event(app: &App, column: u16, row: u16) -> Option<Event> {
+    if app.screen() == codex_spawns::interactive::Screen::Conversations && row == 4 {
+        return conversation_header_sort(column, app.conversation_viewport().column)
+            .map(Event::SelectSort);
+    }
+    if app.screen() == codex_spawns::interactive::Screen::Conversations && row >= 5 {
+        return Some(Event::MouseSelect {
+            index: app.conversation_viewport().row + row.saturating_sub(5) as usize,
+        });
+    }
+    None
+}
+
+fn conversation_header_sort(
+    column: u16,
+    horizontal_offset: usize,
+) -> Option<codex_spawns::interactive::Sort> {
+    use codex_spawns::interactive::Sort;
+    let column = column as usize;
+    if (2..50).contains(&column) {
+        return Some(Sort::Title);
+    }
+    let moving = column.saturating_sub(52).saturating_add(horizontal_offset);
+    match moving {
+        0..=15 => Some(Sort::Updated),
+        17..=22 => Some(Sort::Agents),
+        24..=28 => Some(Sort::Depth),
+        30..=38 => Some(Sort::State),
+        40..=49 => Some(Sort::Profile),
         _ => None,
     }
 }
@@ -876,23 +1002,97 @@ mod tests {
     #[test]
     fn terminal_mouse_scroll_maps_to_keyboard_equivalent_navigation() {
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent};
+        let mut app = App::new(Preferences::default());
+        app.update(Event::SetViewport {
+            width: 80,
+            height: 3,
+        });
         assert_eq!(
-            map_event(TerminalEvent::Mouse(MouseEvent {
-                kind: MouseEventKind::ScrollDown,
-                column: 0,
-                row: 0,
-                modifiers: KeyModifiers::NONE
-            })),
+            map_event(
+                TerminalEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: 0,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE
+                }),
+                &app
+            ),
             Some(Event::Down)
         );
         assert_eq!(
-            map_event(TerminalEvent::Mouse(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 4,
-                row: 7,
-                modifiers: KeyModifiers::NONE
-            })),
-            Some(Event::MouseSelect { index: 5 })
+            map_event(
+                TerminalEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 4,
+                    row: 6,
+                    modifiers: KeyModifiers::NONE
+                }),
+                &app
+            ),
+            Some(Event::MouseSelect { index: 1 })
+        );
+    }
+
+    #[test]
+    fn terminal_keys_cover_page_home_end_back_and_horizontal_navigation() {
+        use crossterm::event::KeyEvent;
+        let app = App::new(Preferences::default());
+        let key =
+            |code, modifiers| map_event(TerminalEvent::Key(KeyEvent::new(code, modifiers)), &app);
+        assert_eq!(
+            key(KeyCode::PageUp, KeyModifiers::NONE),
+            Some(Event::PageUp)
+        );
+        assert_eq!(
+            key(KeyCode::PageDown, KeyModifiers::NONE),
+            Some(Event::PageDown)
+        );
+        assert_eq!(key(KeyCode::Home, KeyModifiers::NONE), Some(Event::Home));
+        assert_eq!(key(KeyCode::End, KeyModifiers::NONE), Some(Event::End));
+        assert_eq!(
+            key(KeyCode::Backspace, KeyModifiers::NONE),
+            Some(Event::Back)
+        );
+        assert_eq!(
+            key(KeyCode::Left, KeyModifiers::NONE),
+            Some(Event::ScrollLeft)
+        );
+        assert_eq!(
+            key(KeyCode::Right, KeyModifiers::SHIFT),
+            Some(Event::ScrollRightPage)
+        );
+        assert_eq!(
+            key(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            Some(Event::PageUp)
+        );
+        assert_eq!(
+            key(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            Some(Event::PageDown)
+        );
+    }
+
+    #[test]
+    fn conversation_mouse_hits_headers_and_viewport_relative_rows() {
+        let mut app = App::new(Preferences::default());
+        app.update(Event::SetViewport {
+            width: 80,
+            height: 2,
+        });
+        assert_eq!(
+            mouse_event(&app, 3, 4),
+            Some(Event::SelectSort(codex_spawns::interactive::Sort::Title))
+        );
+        assert_eq!(
+            mouse_event(&app, 54, 4),
+            Some(Event::SelectSort(codex_spawns::interactive::Sort::Updated))
+        );
+        assert_eq!(
+            mouse_event(&app, 70, 4),
+            Some(Event::SelectSort(codex_spawns::interactive::Sort::Agents))
+        );
+        assert_eq!(
+            mouse_event(&app, 3, 6),
+            Some(Event::MouseSelect { index: 1 })
         );
     }
 }

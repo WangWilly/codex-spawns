@@ -13,6 +13,9 @@ fn conversation(id: &str, title: &str) -> ConversationItem {
         agent_count: 2,
         max_depth: 2,
         profile_complete: true,
+        title_source: "user message".into(),
+        state: "active".into(),
+        profile: "complete".into(),
     }
 }
 

@@ -86,19 +86,13 @@ fn render_conversations(frame: &mut Frame<'_>, app: &App, area: Rect) {
             " "
         };
         let title = fit(&item.title, TITLE_WIDTH);
-        let state = if item.archived { "archived" } else { "active" };
-        let profile = if item.profile_complete {
-            "complete"
-        } else {
-            "partial"
-        };
         let rest = format!(
             "{:<16} {:>6} {:>5} {:<9} {:<10} {:<12}",
             display_time(&item.last_activity_at),
             item.agent_count,
             item.max_depth,
-            state,
-            profile,
+            item.state,
+            item.profile,
             short_id(&item.id)
         );
         lines.push(styled(
@@ -120,7 +114,12 @@ fn render_conversations(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
     let preview = app
         .selected_conversation()
-        .map(|c| format!("{}  cwd: {}  id: {}", c.title, c.cwd, c.id))
+        .map(|c| {
+            format!(
+                "{}  cwd: {}  id: {}  title source: {}",
+                c.title, c.cwd, c.id, c.title_source
+            )
+        })
         .unwrap_or_else(|| "No conversation selected".into());
     frame.render_widget(
         Paragraph::new(preview).block(
