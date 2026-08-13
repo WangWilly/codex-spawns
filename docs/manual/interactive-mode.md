@@ -43,14 +43,21 @@ content.
 
 ## Sort the complete catalog
 
-Press `s` to open the sort menu, select `Updated`, `Title`, `Agents`, `Depth`,
-`State`, or `Profile`, and press `Enter`. Selecting the active field reverses
+Press `s` to open the sort menu, select `Updated`, `Title`, `Project`, `Tokens`,
+`Agents`, `Depth`, `State`, or `Profile`, and press `Enter`. Selecting the active field reverses
 the direction. The active header displays `↑` or `↓`.
 
 You can also click a sortable header and click it again to reverse direction.
 Sorting applies to the full indexed catalog, not only the rows currently
 loaded. A new sorted browse snapshot starts at its first row; equal values use
 the full conversation ID as a stable tie-breaker.
+
+`Project` is the current Codex App assignment, not a directory-name guess. An
+explicitly projectless conversation displays `No Project`; missing App evidence
+displays `unknown`. `Tokens` is exact when every session in the tree has usage
+evidence, a `≥` lower bound when coverage is partial, and `unknown` when no
+session has evidence. Assigned projects and known token totals sort first;
+`No Project` precedes unknown project values, and unknown tokens remain last.
 
 ## Understand conversation titles
 
@@ -72,3 +79,7 @@ codex-spawns index status
 The output reports `projection_version`, `required_projection_version`, and
 `needs_reprojection`. A failed reprojection leaves the previous snapshot
 available; source rollouts and Codex state databases remain read-only.
+
+The status output also reports App metadata health. A temporarily unreadable
+App catalog or global-state file leaves the last valid title/project/token
+enrichment intact while rollout refresh continues.

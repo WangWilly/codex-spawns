@@ -208,6 +208,80 @@ fn project_and_token_sort_filter_search_and_cursors_are_catalog_wide() {
     );
 }
 
+#[test]
+fn failed_app_refresh_retains_the_last_valid_title_project_and_fallback_tokens() {
+    let (_dir, mut index) = open();
+    let mut enriched = conversation("root", "1");
+    enriched.title = "App title".into();
+    enriched.title_source = "app".into();
+    enriched.project = ProfileFact::observed(
+        ProjectAssignment::Assigned {
+            id: "p-1".into(),
+            name: "Atlas".into(),
+        },
+        crate::SourceRef::Derived { rule: "app".into() },
+    );
+    enriched.tokens = token_summary(900, 1, 1);
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![enriched.clone()],
+                app_metadata_refreshed: true,
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+    let mut rollout_only = conversation("root", "2");
+    rollout_only.title = "Rollout fallback".into();
+    rollout_only.tokens = TokenUsageSummary::default();
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![rollout_only],
+                app_metadata_diagnostic: Some("App metadata unavailable: fixture".into()),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+    let retained = index.profile("root").unwrap().unwrap().conversation;
+    assert_eq!(retained.title, "App title");
+    assert_eq!(retained.project, enriched.project);
+    assert_eq!(retained.tokens, enriched.tokens);
+    assert_eq!(
+        index.app_metadata_status().unwrap(),
+        "App metadata unavailable: fixture"
+    );
+}
+
+#[test]
+fn opening_a_v2_catalog_migrates_profile_fields_without_losing_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.sqlite");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch(r#"
+        CREATE TABLE conversations(id TEXT PRIMARY KEY,title TEXT NOT NULL,title_source TEXT NOT NULL,cwd TEXT NOT NULL,created_at TEXT NOT NULL,last_activity_at TEXT NOT NULL,archived INTEGER NOT NULL,model TEXT,status TEXT,agent_count INTEGER NOT NULL,max_depth INTEGER NOT NULL,profile_complete INTEGER NOT NULL,indexed_generation INTEGER NOT NULL,conversation_state TEXT NOT NULL DEFAULT 'active',profile_quality TEXT NOT NULL DEFAULT 'partial');
+        CREATE TABLE conversation_versions(id TEXT NOT NULL,title TEXT NOT NULL,title_source TEXT NOT NULL,cwd TEXT NOT NULL,created_at TEXT NOT NULL,last_activity_at TEXT NOT NULL,archived INTEGER NOT NULL,model TEXT,status TEXT,agent_count INTEGER NOT NULL,max_depth INTEGER NOT NULL,profile_complete INTEGER NOT NULL,conversation_state TEXT NOT NULL,profile_quality TEXT NOT NULL,indexed_generation INTEGER NOT NULL,PRIMARY KEY(id,indexed_generation));
+        CREATE TABLE agents(id TEXT PRIMARY KEY,root_id TEXT NOT NULL REFERENCES conversations(id),parent_id TEXT,agent_path TEXT,task_name TEXT,task_excerpt TEXT,role TEXT,nickname TEXT,model TEXT,effort TEXT,status TEXT NOT NULL,depth INTEGER NOT NULL,evidence_complete INTEGER NOT NULL);
+        CREATE TABLE agent_versions(id TEXT NOT NULL,root_id TEXT NOT NULL,parent_id TEXT,agent_path TEXT,task_name TEXT,task_excerpt TEXT,role TEXT,nickname TEXT,model TEXT,effort TEXT,status TEXT NOT NULL,depth INTEGER NOT NULL,evidence_complete INTEGER NOT NULL,indexed_generation INTEGER NOT NULL,PRIMARY KEY(id,indexed_generation));
+        CREATE TABLE sources(logical_id TEXT PRIMARY KEY,canonical_path TEXT NOT NULL UNIQUE,size INTEGER NOT NULL,modified_ns INTEGER NOT NULL,fingerprint TEXT NOT NULL,safe_offset INTEGER NOT NULL,archived INTEGER NOT NULL,missing INTEGER NOT NULL DEFAULT 0,missing_since INTEGER);
+        CREATE TABLE index_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+        INSERT INTO conversations VALUES('legacy','Legacy title','derived','/work','1','2',0,NULL,NULL,0,0,0,1,'active','partial');
+        INSERT INTO index_metadata VALUES('projection_version','2');
+        PRAGMA user_version=2;
+    "#).unwrap();
+    drop(connection);
+
+    let index = ProfileIndex::open(IndexOptions { path }).unwrap();
+    let record = index.profile("legacy").unwrap().unwrap().conversation;
+    assert_eq!(record.title, "Legacy title");
+    assert_eq!(record.project, ProfileFact::unknown());
+    assert_eq!(record.tokens, TokenUsageSummary::default());
+}
+
 fn token_summary(total: u64, covered: usize, sessions: usize) -> TokenUsageSummary {
     TokenUsageSummary {
         usage: ProfileFact::observed(

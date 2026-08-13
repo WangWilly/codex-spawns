@@ -1,4 +1,8 @@
 use assert_cmd::Command;
+use codex_spawns::{
+    index::{IndexOptions, ProfileIndex},
+    ProjectAssignment,
+};
 use predicates::prelude::*;
 use tempfile::TempDir;
 
@@ -154,8 +158,8 @@ fn index_refresh_status_and_rebuild_use_discovered_rollouts() {
         .success()
         .stdout(predicate::str::contains("conversations: 1"))
         .stdout(predicate::str::contains("agents: 2"))
-        .stdout(predicate::str::contains("projection_version: 2"))
-        .stdout(predicate::str::contains("required_projection_version: 2"))
+        .stdout(predicate::str::contains("projection_version: 3"))
+        .stdout(predicate::str::contains("required_projection_version: 3"))
         .stdout(predicate::str::contains("needs_reprojection: false"));
     Command::cargo_bin("codex-spawns")
         .unwrap()
@@ -212,4 +216,63 @@ fn index_refresh_keeps_distinct_rollout_identities_with_inherited_metadata() {
         .assert()
         .success()
         .stdout(predicate::str::contains("indexed: 2 conversations"));
+}
+
+#[test]
+fn index_refresh_reads_app_metadata_only_from_the_injected_codex_home() {
+    let home = TempDir::new().unwrap();
+    let catalog = home.path().join("state_5.sqlite");
+    let connection = rusqlite::Connection::open(&catalog).unwrap();
+    connection.execute_batch("CREATE TABLE threads(id TEXT PRIMARY KEY,title TEXT,tokens_used INTEGER); INSERT INTO threads VALUES('01900000-0000-7000-8000-000000000001','**App Atlas title**',1234);").unwrap();
+    std::fs::write(home.path().join(".codex-global-state.json"), r#"{"local-projects":{"project-1":{"name":"Atlas"}},"thread-project-assignments":{"01900000-0000-7000-8000-000000000001":"project-1"},"projectless-thread-ids":[]}"#).unwrap();
+
+    Command::cargo_bin("codex-spawns")
+        .unwrap()
+        .args([
+            "index",
+            "refresh",
+            "--codex-home",
+            home.path().to_str().unwrap(),
+            "--file",
+            &fixture("parent.jsonl"),
+            "--file",
+            &fixture("child.jsonl"),
+            "--no-state-db",
+        ])
+        .assert()
+        .success();
+
+    let index = ProfileIndex::open(IndexOptions {
+        path: home.path().join("cache/codex-spawns/index.sqlite"),
+    })
+    .unwrap();
+    let profile = index
+        .profile("01900000-0000-7000-8000-000000000001")
+        .unwrap()
+        .unwrap();
+    assert_eq!(profile.conversation.title, "App Atlas title");
+    assert_eq!(
+        profile.conversation.project.value,
+        Some(ProjectAssignment::Assigned {
+            id: "project-1".into(),
+            name: "Atlas".into()
+        })
+    );
+    assert_eq!(
+        profile
+            .conversation
+            .tokens
+            .usage
+            .value
+            .unwrap()
+            .total_tokens,
+        1234
+    );
+    assert_eq!(
+        (
+            profile.conversation.tokens.covered_sessions,
+            profile.conversation.tokens.total_sessions
+        ),
+        (1, 2)
+    );
 }

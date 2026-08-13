@@ -18,7 +18,7 @@ shows the complete agent tree, and loads detailed evidence only when requested.
 
 ## Features
 
-- Interactive root-conversation browser with cursor pagination.
+- Interactive root-conversation browser with cursor pagination, App project assignments, and exact or lower-bound token usage.
 - Complete nested agent trees, including requested, failed, state-only, and
   unresolved spawn attempts.
 - Requested and effective model, reasoning effort, role, status, timing, tool,
@@ -132,7 +132,9 @@ message excerpts, not complete prompts, task messages, raw evidence, or
 transcripts. Complete content is read from its source only when requested.
 
 Rollout JSONL and Codex state databases are always read-only. `index rebuild`
-and `index prune` modify only the disposable Profile Index. Machine-readable
+and `index prune` modify only the disposable Profile Index. Codex App enrichment
+is read from the selected `CODEX_HOME`; if either App store is unavailable, the
+last valid indexed enrichment is retained. Machine-readable
 exports omit complete messages unless `--include-message` is explicit; review
 exports before sharing because rollout metadata can still contain private paths
 and project details.
