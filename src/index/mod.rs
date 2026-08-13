@@ -310,6 +310,22 @@ impl ProfileIndex {
         }))
     }
 
+    pub fn agent(&self, agent_id: &str) -> Result<Option<AgentRecord>, IndexError> {
+        self.conn
+            .query_row(
+                "SELECT id,root_id,parent_id,agent_path,task_name,task_excerpt,role,nickname,model,effort,status,depth,evidence_complete FROM agents WHERE id=?1",
+                [agent_id],
+                |row| Ok(AgentRecord {
+                    id: row.get(0)?, root_id: row.get(1)?, parent_id: row.get(2)?,
+                    agent_path: row.get(3)?, task_name: row.get(4)?, task_excerpt: row.get(5)?,
+                    role: row.get(6)?, nickname: row.get(7)?, model: row.get(8)?, effort: row.get(9)?,
+                    status: row.get(10)?, depth: row.get(11)?, evidence_complete: row.get(12)?,
+                }),
+            )
+            .optional()
+            .map_err(IndexError::from)
+    }
+
     pub fn stats(&self) -> Result<IndexStats, IndexError> {
         Ok(IndexStats {
             conversations: self

@@ -240,6 +240,7 @@ impl App {
                 }
                 self.details.retain(|d| d.agent_id != detail.agent_id);
                 self.details.push(detail);
+                self.screen = Screen::AgentDetail;
             }
             Event::Resize { width, .. } => self.width = width,
             Event::RefreshProgress(progress) => self.refresh_progress = Some(progress),

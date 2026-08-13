@@ -1,6 +1,6 @@
 use codex_spawns::interactive::{
-    AgentItem, AgentStatus, App, Command, ConversationItem, Event, Filter, Focus, Page,
-    Preferences, RefreshProgress, Screen,
+    AgentDetail, AgentItem, AgentStatus, App, Command, ConversationItem, Event, Filter, Focus,
+    Page, Preferences, RefreshProgress, Screen,
 };
 
 fn conversation(id: &str, title: &str) -> ConversationItem {
@@ -14,6 +14,50 @@ fn conversation(id: &str, title: &str) -> ConversationItem {
         max_depth: 2,
         profile_complete: true,
     }
+}
+
+#[test]
+fn detail_and_source_actions_are_not_dropped() {
+    let mut app = App::new(Preferences::default());
+    app.update(Event::ConversationsLoaded(Page {
+        items: vec![conversation("root", "Root")],
+        next_cursor: None,
+        approximate_total: None,
+    }));
+    app.update(Event::Enter);
+    app.update(Event::AgentsLoaded {
+        conversation_id: "root".into(),
+        agents: vec![agent("child", Some("root"), 1, AgentStatus::Spawned)],
+    });
+    assert_eq!(
+        app.update(Event::Enter),
+        vec![Command::LoadAgentDetail {
+            agent_id: "child".into()
+        }]
+    );
+    app.update(Event::AgentDetailLoaded(AgentDetail {
+        agent_id: "child".into(),
+        lines: vec![
+            ("event count".into(), "4".into()),
+            ("provenance".into(), "rollout:3".into()),
+        ],
+    }));
+    assert_eq!(
+        app.selected_detail().unwrap().lines[0],
+        ("event count".into(), "4".into())
+    );
+    assert_eq!(
+        app.update(Event::Key('e')),
+        vec![Command::OpenEvidence {
+            agent_id: "child".into()
+        }]
+    );
+    assert_eq!(
+        app.update(Event::Key('m')),
+        vec![Command::OpenMessage {
+            agent_id: "child".into()
+        }]
+    );
 }
 
 fn agent(id: &str, parent: Option<&str>, depth: u32, status: AgentStatus) -> AgentItem {

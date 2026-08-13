@@ -113,6 +113,25 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                                 });
                             }
                         }
+                        Command::LoadAgentDetail { agent_id } => {
+                            if let Some(agent) =
+                                index.agent(&agent_id).map_err(|e| e.to_string())?
+                            {
+                                app.update(Event::AgentDetailLoaded(summary_detail(agent)));
+                            }
+                        }
+                        Command::OpenEvidence { agent_id } => {
+                            let scan = crate::cli::load(common)?;
+                            app.update(Event::AgentDetailLoaded(source_detail(
+                                &scan, &agent_id, false,
+                            )));
+                        }
+                        Command::OpenMessage { agent_id } => {
+                            let scan = crate::cli::load(common)?;
+                            app.update(Event::AgentDetailLoaded(source_detail(
+                                &scan, &agent_id, true,
+                            )));
+                        }
                         Command::Refresh if refresh.is_none() => {
                             refresh = Some(start_refresh(common.clone(), path.clone(), false));
                         }
@@ -124,6 +143,107 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                 }
             }
         }
+    }
+}
+
+fn summary_detail(agent: AgentRecord) -> codex_spawns::interactive::AgentDetail {
+    let mut lines = vec![
+        ("status".into(), agent.status),
+        ("depth".into(), agent.depth.to_string()),
+        (
+            "parent".into(),
+            agent.parent_id.unwrap_or_else(|| "unknown".into()),
+        ),
+        (
+            "task".into(),
+            agent.task_name.unwrap_or_else(|| "unknown".into()),
+        ),
+        (
+            "model".into(),
+            agent.model.unwrap_or_else(|| "unknown".into()),
+        ),
+        (
+            "effort".into(),
+            agent.effort.unwrap_or_else(|| "unknown".into()),
+        ),
+        (
+            "role".into(),
+            agent.role.unwrap_or_else(|| "unknown".into()),
+        ),
+        (
+            "nickname".into(),
+            agent.nickname.unwrap_or_else(|| "unknown".into()),
+        ),
+        (
+            "agent path".into(),
+            agent.agent_path.unwrap_or_else(|| "unknown".into()),
+        ),
+        (
+            "evidence complete".into(),
+            agent.evidence_complete.to_string(),
+        ),
+    ];
+    if let Some(excerpt) = agent.task_excerpt {
+        lines.push(("message excerpt".into(), excerpt));
+    }
+    codex_spawns::interactive::AgentDetail {
+        agent_id: agent.id,
+        lines,
+    }
+}
+
+fn source_detail(
+    scan: &ScanResult,
+    agent_id: &str,
+    include_message: bool,
+) -> codex_spawns::interactive::AgentDetail {
+    let attempt = scan
+        .spawn_attempts
+        .iter()
+        .find(|a| a.child_thread_id.as_deref() == Some(agent_id) || a.id == agent_id);
+    let session = scan.agent_sessions.iter().find(|a| a.id == agent_id);
+    let mut lines = Vec::new();
+    if let Some(a) = attempt {
+        lines.push((
+            "created".into(),
+            a.created_at
+                .value
+                .clone()
+                .unwrap_or_else(|| "unknown".into()),
+        ));
+        lines.push((
+            "created confidence".into(),
+            format!("{:?}", a.created_at.confidence).to_lowercase(),
+        ));
+        lines.push((
+            "evidence sources".into(),
+            serde_json::to_string(&a.evidence).unwrap_or_default(),
+        ));
+        if let Some(error) = a.output_error.value.clone() {
+            lines.push(("output error".into(), error));
+        }
+        if include_message {
+            lines.push((
+                "message".into(),
+                a.message.value.clone().unwrap_or_else(|| "unknown".into()),
+            ));
+        }
+    }
+    if let Some(s) = session {
+        lines.push(("event count".into(), s.event_count.to_string()));
+        lines.push(("parse errors".into(), s.parse_errors.to_string()));
+        lines.push(("rollout".into(), s.path.display().to_string()));
+        lines.push((
+            "model provenance".into(),
+            serde_json::to_string(&s.model.provenance).unwrap_or_default(),
+        ));
+    }
+    if lines.is_empty() {
+        lines.push(("source".into(), "No source evidence found".into()));
+    }
+    codex_spawns::interactive::AgentDetail {
+        agent_id: agent_id.into(),
+        lines,
     }
 }
 
