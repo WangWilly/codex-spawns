@@ -111,6 +111,75 @@ fn filters_metadata_without_indexing_messages() {
 }
 
 #[test]
+fn search_matches_agent_metadata_outside_conversation_columns() {
+    let (_dir, mut index) = open();
+    let agent = AgentRecord {
+        id: "agent-special".into(),
+        root_id: "active".into(),
+        parent_id: Some("active".into()),
+        agent_path: Some("/root/scout".into()),
+        task_name: Some("inspect-parser".into()),
+        task_excerpt: Some("sensitive text is not searched".into()),
+        role: Some("explorer".into()),
+        nickname: Some("Scout".into()),
+        model: Some("gpt-special".into()),
+        effort: Some("high".into()),
+        status: "spawned".into(),
+        depth: 1,
+        evidence_complete: true,
+    };
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![conversation("active", "2026-01-01")],
+                agents: vec![agent],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    for query in [
+        "agent-special",
+        "inspect-parser",
+        "explorer",
+        "Scout",
+        "gpt-special",
+        "spawned",
+    ] {
+        let page = index
+            .browse(
+                &ConversationFilter {
+                    query: Some(query.into()),
+                    ..Default::default()
+                },
+                None,
+                25,
+            )
+            .unwrap();
+        assert_eq!(
+            page.conversations
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["active"],
+            "query {query}"
+        );
+    }
+    assert!(index
+        .browse(
+            &ConversationFilter {
+                query: Some("sensitive text".into()),
+                ..Default::default()
+            },
+            None,
+            25
+        )
+        .unwrap()
+        .conversations
+        .is_empty());
+}
+
+#[test]
 fn source_identity_supports_append_move_and_replacement() {
     let (_dir, mut index) = open();
     let source = SourceRecord {

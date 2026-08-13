@@ -24,7 +24,12 @@ fn detail_and_source_actions_are_not_dropped() {
         next_cursor: None,
         approximate_total: None,
     }));
-    app.update(Event::Enter);
+    assert_eq!(
+        app.update(Event::Enter),
+        vec![Command::LoadAgents {
+            conversation_id: "root".into()
+        }]
+    );
     app.update(Event::AgentsLoaded {
         conversation_id: "root".into(),
         agents: vec![agent("child", Some("root"), 1, AgentStatus::Spawned)],
@@ -94,11 +99,23 @@ fn list_navigation_search_filter_and_cursor_request_are_commands() {
     for ch in "profiler".chars() {
         app.update(Event::Key(ch));
     }
-    app.update(Event::Enter);
+    assert_eq!(
+        app.update(Event::Enter),
+        vec![Command::Search {
+            query: "profiler".into(),
+            filter: Filter::All
+        }]
+    );
     assert_eq!(app.visible_conversations().len(), 1);
     assert_eq!(app.visible_conversations()[0].id, "one");
 
-    app.update(Event::Key('f'));
+    assert_eq!(
+        app.update(Event::Key('f')),
+        vec![Command::Search {
+            query: "profiler".into(),
+            filter: Filter::ActiveOnly
+        }]
+    );
     assert_eq!(app.filter(), Filter::ActiveOnly);
     app.update(Event::ClearSearch);
     app.select_last();

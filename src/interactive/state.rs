@@ -167,6 +167,7 @@ pub enum Command {
     Rebuild,
     OpenEvidence { agent_id: String },
     OpenMessage { agent_id: String },
+    Search { query: String, filter: Filter },
 }
 
 #[derive(Debug)]
@@ -306,7 +307,10 @@ impl App {
                     Filter::ArchivedOnly => Filter::All,
                 };
                 self.clamp_selection();
-                vec![]
+                vec![Command::Search {
+                    query: self.search.clone(),
+                    filter: self.preferences.filter,
+                }]
             }
             'j' => self.move_down(),
             'k' => {
@@ -350,7 +354,10 @@ impl App {
     fn enter(&mut self) -> Vec<Command> {
         if self.search_editing {
             self.search_editing = false;
-            return vec![];
+            return vec![Command::Search {
+                query: self.search.clone(),
+                filter: self.preferences.filter,
+            }];
         }
         if let Some(page) = self.pending_snapshot.take() {
             self.replace_page(page);

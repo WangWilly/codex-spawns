@@ -206,7 +206,10 @@ impl ProfileIndex {
             "SELECT id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete
              FROM conversations WHERE indexed_generation <= ?1 AND (last_activity_at < ?2 OR (last_activity_at = ?2 AND id < ?3))
              AND (?4 IS NULL OR archived=?4) AND (?5 IS NULL OR cwd=?5) AND (?6 IS NULL OR model=?6) AND (?7 IS NULL OR status=?7)
-             AND (?8 IS NULL OR title LIKE '%'||?8||'%' OR id LIKE '%'||?8||'%' OR cwd LIKE '%'||?8||'%')
+             AND (?8 IS NULL OR title LIKE '%'||?8||'%' OR id LIKE '%'||?8||'%' OR cwd LIKE '%'||?8||'%'
+               OR EXISTS (SELECT 1 FROM agents a WHERE a.root_id=conversations.id AND
+                 (a.id LIKE '%'||?8||'%' OR a.task_name LIKE '%'||?8||'%' OR a.role LIKE '%'||?8||'%'
+                  OR a.nickname LIKE '%'||?8||'%' OR a.model LIKE '%'||?8||'%' OR a.status LIKE '%'||?8||'%')))
              ORDER BY last_activity_at DESC,id DESC LIMIT ?9")?;
         let archived = filter.archived.map(i64::from);
         let rows = stmt.query_map(

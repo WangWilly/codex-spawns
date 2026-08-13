@@ -117,6 +117,16 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                                 .map_err(|e| e.to_string())?;
                             app.update(Event::MoreConversationsLoaded(to_page(page)));
                         }
+                        Command::Search { query, filter } => {
+                            let page = index
+                                .browse(
+                                    &browse_filter(filter, query),
+                                    None,
+                                    app.preferences().page_size,
+                                )
+                                .map_err(|e| e.to_string())?;
+                            app.update(Event::ConversationsLoaded(to_page(page)));
+                        }
                         Command::LoadAgents { conversation_id } => {
                             if let Some(profile) =
                                 index.profile(&conversation_id).map_err(|e| e.to_string())?
@@ -174,6 +184,19 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                 }
             }
         }
+    }
+}
+
+fn browse_filter(filter: codex_spawns::interactive::Filter, query: String) -> ConversationFilter {
+    use codex_spawns::interactive::Filter;
+    ConversationFilter {
+        archived: match filter {
+            Filter::All => None,
+            Filter::ActiveOnly => Some(false),
+            Filter::ArchivedOnly => Some(true),
+        },
+        query: (!query.is_empty()).then_some(query),
+        ..Default::default()
     }
 }
 
