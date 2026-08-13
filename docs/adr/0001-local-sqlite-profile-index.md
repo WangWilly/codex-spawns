@@ -5,3 +5,5 @@ Interactive Mode needs to show Root Conversations quickly without reparsing ever
 ## Consequences
 
 The CLI must support index refresh, rebuild, schema migration, a configurable index path, and a `--no-cache` path. Interactive Mode uses stale-while-refresh: it immediately opens an existing browse snapshot, refreshes the index in the background, and applies newly indexed data only when the user requests it. First-time indexing prioritizes enough recent sources to produce the first result page before continuing in batches. Deleting the index must never delete or modify source data.
+
+Persist a projection schema version independently from the storage schema. When title extraction or another display projection changes, Interactive Mode continues to show the last usable snapshot while affected Root Conversations are reprojected transactionally in the background; users apply the completed snapshot explicitly, and `index status` reports current and required projection versions.

@@ -57,9 +57,11 @@ Run with no arguments in a terminal to open Interactive Mode:
 codex-spawns
 ```
 
-The initial screen lists Root Conversations by recent activity. Open one to
-inspect its full Agent Tree and the selected agent's profile. Existing index
-data appears immediately while changed rollouts refresh in the background.
+The initial screen lists Root Conversations by recent activity, newest first.
+Its fixed headers identify the title, update time, agent count, tree depth,
+conversation state, profile quality, and short ID. Open a row to inspect its
+full Agent Tree and the selected agent's profile. Existing index data appears
+immediately while changed rollouts refresh in the background.
 
 The default data source is `$CODEX_HOME`, or `~/.codex` when that variable is
 unset. Active and archived sessions are included unless disabled.
@@ -69,8 +71,13 @@ unset. Active and archived sessions are included unless disabled.
 | Key | Action |
 | --- | --- |
 | `↑` / `↓`, `j` / `k` | Move selection |
+| `PageUp` / `PageDown`, `Ctrl+U` / `Ctrl+D` | Move one visible page |
+| `Home` / `End`, `g` / `G` | Move to the first or last loaded row |
+| `←` / `→`, `H` / `L` | Scroll horizontally |
+| `Shift+←` / `Shift+→` | Scroll horizontally by one viewport |
 | `Enter` | Open a conversation or agent; apply an available snapshot |
-| `Esc`, `Backspace` | Return to the previous view |
+| `Esc`, `Backspace`, `h` | Return to the previous view and position |
+| `s` | Choose a sort column; choosing it again reverses direction |
 | `/` | Search indexed metadata |
 | `f` | Change filters |
 | `r` | Incrementally refresh the index |
@@ -82,7 +89,10 @@ unset. Active and archived sessions are included unless disabled.
 | `q` | Quit |
 
 Mouse input is optional. Status is never communicated by color alone, and
-`NO_COLOR` is respected.
+`NO_COLOR` is respected. Clicking a sortable column header selects it; clicking
+the active header reverses its direction. See the
+[Interactive Mode manual](docs/manual/interactive-mode.md) for table semantics,
+navigation behavior, sorting, and conversation-title migration.
 
 ## Command Mode
 

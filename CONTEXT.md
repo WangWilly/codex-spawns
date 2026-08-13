@@ -32,8 +32,12 @@ _Avoid_: Cache, transcript database
 A stable ordering of Root Conversations used while advancing through cursor-paginated results. Newly indexed conversations appear after an explicit refresh rather than shifting items during the current browse operation.
 _Avoid_: Page, result cache
 
+**Viewport**:
+The visible window over the currently loaded rows in Interactive Mode. Its position follows the selected row and is distinct from loading another cursor page from the Profile Index.
+_Avoid_: Cursor page, browse snapshot
+
 **Conversation Title**:
-The human-readable name shown consistently for a Root Conversation in lists and profile headers. It is either supplied by rollout metadata or deterministically derived from the first user message, working directory and start time, or short conversation ID, in that order.
+The human-readable name shown consistently for a Root Conversation in lists and profile headers. It is either supplied by rollout metadata or deterministically derived from the first meaningful user-authored text after structured content, injected instructions, plugin catalogs, skill metadata, environment context, and attachment metadata are removed; working directory and start time, then short conversation ID, are the final fallbacks.
 _Avoid_: Task name, agent name
 
 **Spawn Attempt**:
@@ -43,6 +47,14 @@ _Avoid_: Agent, child session
 **Profile Fact**:
 A profiling value paired with its provenance and confidence state: observed, derived, unknown, or conflicting. Missing evidence is never represented as zero, and conflicting sources remain visible rather than being silently overwritten.
 _Avoid_: Metric, inferred value
+
+**Conversation State**:
+The storage lifecycle of a Root Conversation: active, archived, or missing. It does not describe whether agents finished executing or whether profiling evidence is complete.
+_Avoid_: Agent status, profile completeness
+
+**Profile Quality**:
+The evidence quality of a Conversation Profile: complete, partial, conflicting, updating, or error. Agent execution states such as requested, spawned, complete, and failed remain separate and appear in the Agent Tree.
+_Avoid_: Conversation state, completion status
 
 **Maintainer Manual**:
 Documentation under `docs/manual/` for workflows that require human judgement or intervention, such as preparing and validating a release. The README links to these procedures but does not duplicate them.
