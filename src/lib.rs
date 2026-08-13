@@ -4,6 +4,7 @@
 //! Source files are never modified; SQLite is opened in read-only mode.
 
 mod domain;
+pub mod interactive;
 mod parser;
 
 pub use domain::*;
