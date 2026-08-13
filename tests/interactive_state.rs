@@ -1,6 +1,7 @@
 use codex_spawns::interactive::{
     AgentDetail, AgentItem, AgentStatus, App, Command, ConversationItem, Event, Filter, Focus,
-    Page, Preferences, ProjectDisplay, RefreshProgress, Screen, Sort, SortDirection, TokenDisplay,
+    Page, Preferences, ProjectDisplay, ProjectFilter, RefreshProgress, Screen, Sort, SortDirection,
+    TokenDisplay,
 };
 
 fn conversation(id: &str, title: &str) -> ConversationItem {
@@ -134,14 +135,14 @@ fn detail_pane_scroll_is_independent_from_agent_tree_selection() {
             agent("two", Some("one"), 1, AgentStatus::Complete),
         ],
     });
-    app.update(Event::Tab);
+    app.update(Event::Enter);
     app.update(Event::Down);
-    assert_eq!(app.selected_agent_index(), 0);
+    assert_eq!(app.selected_agent_index(), 1);
     assert_eq!(app.detail_viewport().row, 1);
     app.update(Event::BackTab);
     app.update(Event::Down);
     assert_eq!(app.selected_agent_index(), 1);
-    assert_eq!(app.detail_viewport().row, 1);
+    assert_eq!(app.detail_viewport().row, 2);
 }
 
 #[test]
@@ -233,7 +234,8 @@ fn list_navigation_search_filter_and_cursor_request_are_commands() {
         app.update(Event::Enter),
         vec![Command::Search {
             query: "profiler".into(),
-            filter: Filter::All
+            filter: Filter::All,
+            project: ProjectFilter::All,
         }]
     );
     assert_eq!(app.visible_conversations().len(), 1);
@@ -243,7 +245,8 @@ fn list_navigation_search_filter_and_cursor_request_are_commands() {
         app.update(Event::Key('f')),
         vec![Command::Search {
             query: "profiler".into(),
-            filter: Filter::ActiveOnly
+            filter: Filter::ActiveOnly,
+            project: ProjectFilter::All,
         }]
     );
     assert_eq!(app.filter(), Filter::ActiveOnly);
@@ -316,7 +319,7 @@ fn narrow_layout_moves_tree_to_detail_while_wide_layout_changes_focus() {
     assert!(!app.is_narrow());
     assert_eq!(app.focus(), Focus::Tree);
     app.update(Event::Tab);
-    assert_eq!(app.focus(), Focus::Detail);
+    assert_eq!(app.focus(), Focus::Tree);
     app.update(Event::BackTab);
     assert_eq!(app.focus(), Focus::Tree);
 }
@@ -556,4 +559,80 @@ fn horizontal_cursor_reveals_one_complete_column_at_table_edges() {
         ),
         (1, 21)
     );
+}
+
+#[test]
+fn project_filter_cycles_known_projects_and_search_matches_project_name() {
+    let mut alpha = conversation("alpha", "Alpha");
+    alpha.project = ProjectDisplay::Assigned {
+        id: "p-alpha".into(),
+        name: "Alpha Project".into(),
+    };
+    let mut beta = conversation("beta", "Beta");
+    beta.project = ProjectDisplay::Assigned {
+        id: "p-beta".into(),
+        name: "Beta Project".into(),
+    };
+    let mut no_project = conversation("none", "No Project");
+    no_project.project = ProjectDisplay::NoProject;
+    let mut app = App::new(Preferences::default());
+    app.update(Event::ConversationsLoaded(Page {
+        items: vec![beta, no_project, alpha],
+        next_cursor: None,
+        approximate_total: Some(3),
+    }));
+    assert_eq!(
+        app.project_filter_options(),
+        vec![
+            ProjectFilter::All,
+            ProjectFilter::Assigned("p-alpha".into()),
+            ProjectFilter::Assigned("p-beta".into()),
+            ProjectFilter::NoProject,
+            ProjectFilter::Unknown,
+        ]
+    );
+    assert_eq!(
+        app.update(Event::Key('p')),
+        vec![Command::Search {
+            query: String::new(),
+            filter: Filter::All,
+            project: ProjectFilter::Assigned("p-alpha".into()),
+        }]
+    );
+    assert_eq!(app.visible_conversations().len(), 1);
+    app.update(Event::Key('p'));
+    assert_eq!(app.visible_conversations()[0].id, "beta");
+    app.update(Event::ClearSearch);
+    app.update(Event::Key('/'));
+    app.update(Event::Key('b'));
+    app.update(Event::Key('e'));
+    app.update(Event::Key('t'));
+    app.update(Event::Key('a'));
+    app.update(Event::Key(' '));
+    app.update(Event::Key('p'));
+    assert_eq!(app.visible_conversations().len(), 1);
+    assert_eq!(app.visible_conversations()[0].id, "beta");
+}
+
+#[test]
+fn agent_title_width_changes_only_inside_agent_table_and_tab_does_not_focus_hidden_pane() {
+    let mut app = App::new(Preferences::default());
+    app.update(Event::ConversationsLoaded(Page {
+        items: vec![conversation("root", "Root")],
+        next_cursor: None,
+        approximate_total: None,
+    }));
+    app.update(Event::Enter);
+    app.update(Event::AgentsLoaded {
+        conversation_id: "root".into(),
+        agents: vec![agent("child", Some("root"), 1, AgentStatus::Spawned)],
+    });
+    let root_width = app.preferences().root_title_width;
+    app.update(Event::Key('['));
+    assert_eq!(app.preferences().root_title_width, root_width);
+    let agent_width = app.preferences().agent_title_width;
+    app.update(Event::Key(']'));
+    assert_eq!(app.preferences().agent_title_width, agent_width + 4);
+    app.update(Event::Tab);
+    assert_eq!(app.focus(), Focus::Tree);
 }

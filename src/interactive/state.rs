@@ -127,6 +127,78 @@ pub struct AgentItem {
     pub tokens: TokenDisplay,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnKey {
+    Title,
+    Project,
+    Tokens,
+    Updated,
+    State,
+    Profile,
+    Agents,
+    Depth,
+    Model,
+    Id,
+    AgentName,
+    Nickname,
+    Effort,
+    Role,
+    Status,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColumnDescriptor {
+    pub key: ColumnKey,
+    pub header: &'static str,
+    pub width: usize,
+    pub frozen: bool,
+}
+
+pub fn root_columns(title_width: usize) -> Vec<ColumnDescriptor> {
+    [
+        (ColumnKey::Title, "Title", title_width, true),
+        (ColumnKey::Project, "Project", 18, false),
+        (ColumnKey::Tokens, "Tokens", 10, false),
+        (ColumnKey::Updated, "Updated", 16, false),
+        (ColumnKey::State, "State", 10, false),
+        (ColumnKey::Profile, "Profile", 10, false),
+        (ColumnKey::Agents, "Agents", 6, false),
+        (ColumnKey::Depth, "Depth", 5, false),
+        (ColumnKey::Model, "Model", 14, false),
+        (ColumnKey::Id, "ID", 12, false),
+    ]
+    .into_iter()
+    .map(|(key, header, width, frozen)| ColumnDescriptor {
+        key,
+        header,
+        width,
+        frozen,
+    })
+    .collect()
+}
+
+pub fn agent_columns(title_width: usize) -> Vec<ColumnDescriptor> {
+    [
+        (ColumnKey::Title, "Title", title_width, true),
+        (ColumnKey::AgentName, "Agent Name", 20, false),
+        (ColumnKey::Nickname, "Nickname", 14, false),
+        (ColumnKey::Model, "Model", 14, false),
+        (ColumnKey::Effort, "Effort", 10, false),
+        (ColumnKey::Role, "Role", 14, false),
+        (ColumnKey::Status, "Status", 12, false),
+        (ColumnKey::Tokens, "Tokens", 10, false),
+        (ColumnKey::Id, "ID", 12, false),
+    ]
+    .into_iter()
+    .map(|(key, header, width, frozen)| ColumnDescriptor {
+        key,
+        header,
+        width,
+        frozen,
+    })
+    .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentDetail {
     pub agent_id: String,
@@ -145,6 +217,15 @@ pub enum Filter {
     All,
     ActiveOnly,
     ArchivedOnly,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ProjectFilter {
+    #[default]
+    All,
+    Assigned(String),
+    NoProject,
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,8 +269,6 @@ pub struct Viewport {
     pub width: usize,
 }
 
-const ROOT_MOVING_COLUMN_WIDTHS: [usize; 9] = [18, 10, 16, 10, 10, 6, 5, 14, 12];
-const AGENT_MOVING_COLUMN_WIDTHS: [usize; 8] = [20, 14, 14, 10, 14, 12, 10, 12];
 const COLUMN_SEPARATOR_WIDTH: usize = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -362,6 +441,7 @@ pub enum Command {
     Search {
         query: String,
         filter: Filter,
+        project: ProjectFilter,
     },
     Sort {
         field: Sort,
@@ -385,6 +465,7 @@ struct NavigationState {
     preferences: Preferences,
     sort_direction: SortDirection,
     search: String,
+    project_filter: ProjectFilter,
     detail_wrap: bool,
 }
 
@@ -406,6 +487,7 @@ pub struct App {
     width: u16,
     search_editing: bool,
     search: String,
+    project_filter: ProjectFilter,
     refresh_progress: Option<RefreshProgress>,
     pending_snapshot: Option<Page<ConversationItem>>,
     rebuild_confirmation: bool,
@@ -438,6 +520,7 @@ impl App {
             width: 100,
             search_editing: false,
             search: String::new(),
+            project_filter: ProjectFilter::All,
             refresh_progress: None,
             pending_snapshot: None,
             rebuild_confirmation: false,
@@ -548,13 +631,11 @@ impl App {
             Event::ScrollRight => self.move_horizontal(true, false),
             Event::ScrollLeftPage => self.move_horizontal(false, true),
             Event::ScrollRightPage => self.move_horizontal(true, true),
-            Event::Tab if !self.is_narrow() => self.focus = Focus::Detail,
-            Event::BackTab if !self.is_narrow() => self.focus = Focus::Tree,
+            Event::Tab | Event::BackTab => {}
             Event::Enter => return self.enter(),
             Event::Back => self.back(),
             Event::Key(key) => return self.key(key),
             Event::SelectSort(field) => return self.apply_sort(field),
-            Event::Tab | Event::BackTab => {}
         }
         vec![]
     }
@@ -604,8 +685,10 @@ impl App {
                 vec![Command::Search {
                     query: self.search.clone(),
                     filter: self.preferences.filter,
+                    project: self.project_filter.clone(),
                 }]
             }
+            'p' if self.screen == Screen::Conversations => self.cycle_project_filter(),
             'j' => self.move_down(),
             'k' => {
                 self.move_up();
@@ -665,6 +748,18 @@ impl App {
                 self.preferences.root_title_width = self.preferences.title_width;
                 vec![]
             }
+            '[' if self.screen == Screen::Conversation => {
+                self.preferences.agent_title_width =
+                    self.preferences.agent_title_width.saturating_sub(4).max(24);
+                self.clamp_agent_columns();
+                vec![]
+            }
+            ']' if self.screen == Screen::Conversation => {
+                self.preferences.agent_title_width =
+                    (self.preferences.agent_title_width + 4).min(100);
+                self.clamp_agent_columns();
+                vec![]
+            }
             'e' => self
                 .selected_agent()
                 .map(|a| {
@@ -691,6 +786,7 @@ impl App {
             return vec![Command::Search {
                 query: self.search.clone(),
                 filter: self.preferences.filter,
+                project: self.project_filter.clone(),
             }];
         }
         if self.sort_overlay {
@@ -762,6 +858,7 @@ impl App {
             self.preferences = state.preferences;
             self.sort_direction = state.sort_direction;
             self.search = state.search;
+            self.project_filter = state.project_filter;
             self.detail_wrap = state.detail_wrap;
             if self.screen == Screen::Conversations {
                 self.selected_root_id = None;
@@ -845,6 +942,7 @@ impl App {
             preferences: self.preferences.clone(),
             sort_direction: self.sort_direction,
             search: self.search.clone(),
+            project_filter: self.project_filter.clone(),
             detail_wrap: self.detail_wrap,
         });
     }
@@ -963,23 +1061,19 @@ impl App {
         match self.screen {
             Screen::Conversations => {
                 let frozen = self.root_title_width().saturating_add(4);
+                let widths = root_columns(self.root_title_width());
                 move_table_column(
                     &mut self.conversation_viewport,
                     frozen,
-                    &ROOT_MOVING_COLUMN_WIDTHS,
+                    &widths[1..],
                     right,
                     page,
                 );
             }
             Screen::Conversation if self.focus == Focus::Tree => {
                 let frozen = self.agent_title_width().saturating_add(4);
-                move_table_column(
-                    &mut self.tree_viewport,
-                    frozen,
-                    &AGENT_MOVING_COLUMN_WIDTHS,
-                    right,
-                    page,
-                );
+                let widths = agent_columns(self.agent_title_width());
+                move_table_column(&mut self.tree_viewport, frozen, &widths[1..], right, page);
             }
             Screen::Conversation | Screen::AgentDetail => {
                 self.scroll_detail_horizontal(right, page)
@@ -1000,16 +1094,14 @@ impl App {
 
     fn clamp_conversation_columns(&mut self) {
         let frozen = self.root_title_width().saturating_add(4);
-        clamp_table_column(
-            &mut self.conversation_viewport,
-            frozen,
-            &ROOT_MOVING_COLUMN_WIDTHS,
-        );
+        let widths = root_columns(self.root_title_width());
+        clamp_table_column(&mut self.conversation_viewport, frozen, &widths[1..]);
     }
 
     fn clamp_agent_columns(&mut self) {
         let frozen = self.agent_title_width().saturating_add(4);
-        clamp_table_column(&mut self.tree_viewport, frozen, &AGENT_MOVING_COLUMN_WIDTHS);
+        let widths = agent_columns(self.agent_title_width());
+        clamp_table_column(&mut self.tree_viewport, frozen, &widths[1..]);
     }
     fn apply_sort(&mut self, field: Sort) -> Vec<Command> {
         self.sort_overlay = false;
@@ -1059,6 +1151,42 @@ impl App {
         self.next_cursor = page.next_cursor;
         self.approximate_total = page.approximate_total;
         self.conversation_selection = 0;
+    }
+
+    fn cycle_project_filter(&mut self) -> Vec<Command> {
+        let options = self.project_filter_options();
+        let current = options
+            .iter()
+            .position(|option| option == &self.project_filter)
+            .unwrap_or(0);
+        self.project_filter = options[(current + 1) % options.len()].clone();
+        self.clamp_selection();
+        vec![Command::Search {
+            query: self.search.clone(),
+            filter: self.preferences.filter,
+            project: self.project_filter.clone(),
+        }]
+    }
+
+    pub fn project_filter_options(&self) -> Vec<ProjectFilter> {
+        let mut assigned = self
+            .conversations
+            .iter()
+            .filter_map(|conversation| match &conversation.project {
+                ProjectDisplay::Assigned { id, name } => Some((name.to_lowercase(), id.clone())),
+                ProjectDisplay::NoProject | ProjectDisplay::Unknown => None,
+            })
+            .collect::<Vec<_>>();
+        assigned.sort();
+        assigned.dedup_by(|left, right| left.1 == right.1);
+        let mut options = vec![ProjectFilter::All];
+        options.extend(
+            assigned
+                .into_iter()
+                .map(|(_, id)| ProjectFilter::Assigned(id)),
+        );
+        options.extend([ProjectFilter::NoProject, ProjectFilter::Unknown]);
+        options
     }
 
     fn open_agent_index(&self) -> usize {
@@ -1183,11 +1311,19 @@ impl App {
                     Filter::ActiveOnly => !c.archived,
                     Filter::ArchivedOnly => c.archived,
                 };
+                let project_filter = match &self.project_filter {
+                    ProjectFilter::All => true,
+                    ProjectFilter::Assigned(id) => c.project.id() == Some(id.as_str()),
+                    ProjectFilter::NoProject => matches!(c.project, ProjectDisplay::NoProject),
+                    ProjectFilter::Unknown => matches!(c.project, ProjectDisplay::Unknown),
+                };
                 filter
+                    && project_filter
                     && (needle.is_empty()
                         || c.title.to_lowercase().contains(&needle)
                         || c.id.to_lowercase().contains(&needle)
-                        || c.cwd.to_lowercase().contains(&needle))
+                        || c.cwd.to_lowercase().contains(&needle)
+                        || c.project.name().to_lowercase().contains(&needle))
             })
             .collect()
     }
@@ -1224,6 +1360,9 @@ impl App {
     }
     pub fn filter(&self) -> Filter {
         self.preferences.filter
+    }
+    pub fn project_filter(&self) -> &ProjectFilter {
+        &self.project_filter
     }
     pub fn preferences(&self) -> &Preferences {
         &self.preferences
@@ -1347,12 +1486,16 @@ fn visible_column_range(offset: usize, capacity: usize, widths: &[usize]) -> (us
     (first, last)
 }
 
-fn clamp_table_column(viewport: &mut Viewport, frozen: usize, widths: &[usize]) {
-    let starts = column_starts(widths);
+fn clamp_table_column(viewport: &mut Viewport, frozen: usize, columns: &[ColumnDescriptor]) {
+    let widths = columns
+        .iter()
+        .map(|column| column.width)
+        .collect::<Vec<_>>();
+    let starts = column_starts(&widths);
     let capacity = viewport.width.saturating_sub(frozen);
     viewport.cursor_column = viewport.cursor_column.min(widths.len().saturating_sub(1));
     viewport.column = viewport.column.min(starts.last().copied().unwrap_or(0));
-    let (first, last) = visible_column_range(viewport.column, capacity, widths);
+    let (first, last) = visible_column_range(viewport.column, capacity, &widths);
     viewport.column = starts[first];
     if viewport.cursor_column < first {
         viewport.cursor_column = first;
@@ -1365,17 +1508,21 @@ fn clamp_table_column(viewport: &mut Viewport, frozen: usize, widths: &[usize]) 
 fn move_table_column(
     viewport: &mut Viewport,
     frozen: usize,
-    widths: &[usize],
+    columns: &[ColumnDescriptor],
     right: bool,
     page: bool,
 ) {
-    if widths.is_empty() {
+    if columns.is_empty() {
         return;
     }
-    let starts = column_starts(widths);
+    let widths = columns
+        .iter()
+        .map(|column| column.width)
+        .collect::<Vec<_>>();
+    let starts = column_starts(&widths);
     let capacity = viewport.width.saturating_sub(frozen).max(1);
-    clamp_table_column(viewport, frozen, widths);
-    let (first, last) = visible_column_range(viewport.column, capacity, widths);
+    clamp_table_column(viewport, frozen, columns);
+    let (first, last) = visible_column_range(viewport.column, capacity, &widths);
     if page {
         if right {
             let next = (last + 1).min(widths.len() - 1);

@@ -6,7 +6,9 @@ use ratatui::{
     Frame,
 };
 
-use super::{AgentStatus, App, Focus, Screen, Sort, SortDirection};
+use super::{
+    agent_columns, root_columns, AgentStatus, App, ColumnKey, Focus, Screen, Sort, SortDirection,
+};
 use chrono::{DateTime, Local};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -48,38 +50,28 @@ fn render_conversations(frame: &mut Frame<'_>, app: &App, area: Rect) {
         SortDirection::Descending => "↓",
     };
     let title_width = frozen_title_width(app.root_title_width(), area.width as usize);
-    let headers = [
-        header(
-            "Title",
-            app.preferences().sort == Sort::Title,
-            arrow,
-            title_width,
-        ),
-        header(
-            "Project",
-            app.preferences().sort == Sort::Project,
-            arrow,
-            18,
-        ),
-        header("Tokens", app.preferences().sort == Sort::Tokens, arrow, 10),
-        header(
-            "Updated",
-            app.preferences().sort == Sort::Updated,
-            arrow,
-            16,
-        ),
-        header("State", app.preferences().sort == Sort::State, arrow, 10),
-        header(
-            "Profile",
-            app.preferences().sort == Sort::Profile,
-            arrow,
-            10,
-        ),
-        header("Agents", app.preferences().sort == Sort::Agents, arrow, 6),
-        header("Depth", app.preferences().sort == Sort::Depth, arrow, 5),
-        header("Model", false, arrow, 14),
-        header("ID", false, arrow, 12),
-    ];
+    let columns = root_columns(title_width);
+    let headers = columns
+        .iter()
+        .map(|column| {
+            header(
+                column.header,
+                matches!(
+                    (column.key, app.preferences().sort),
+                    (ColumnKey::Title, Sort::Title)
+                        | (ColumnKey::Project, Sort::Project)
+                        | (ColumnKey::Tokens, Sort::Tokens)
+                        | (ColumnKey::Updated, Sort::Updated)
+                        | (ColumnKey::State, Sort::State)
+                        | (ColumnKey::Profile, Sort::Profile)
+                        | (ColumnKey::Agents, Sort::Agents)
+                        | (ColumnKey::Depth, Sort::Depth)
+                ),
+                arrow,
+                column.width,
+            )
+        })
+        .collect::<Vec<_>>();
     let mut lines = vec![Line::from(table_line(
         " ",
         &headers[0],
@@ -95,18 +87,11 @@ fn render_conversations(frame: &mut Frame<'_>, app: &App, area: Rect) {
             " "
         };
         let title = fit(&item.title, title_width);
-        let rest = [
-            fit(item.project.name(), 18),
-            fit(&item.tokens.compact(), 10),
-            fit(&display_time(&item.last_activity_at), 16),
-            fit(&item.state, 10),
-            fit(&item.profile, 10),
-            format!("{:>6}", item.agent_count),
-            format!("{:>5}", item.max_depth),
-            fit(item.model.as_deref().unwrap_or("unknown"), 14),
-            fit(&short_id(&item.id), 12),
-        ]
-        .join(" | ");
+        let rest = columns[1..]
+            .iter()
+            .map(|column| fit(&root_cell(item, column.key), column.width))
+            .collect::<Vec<_>>()
+            .join(" | ");
         lines.push(styled(
             table_line(marker, &title, &rest, viewport.column, area.width as usize),
             absolute == app.selected_conversation_index(),
@@ -192,17 +177,11 @@ fn render_tree(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let viewport = app.tree_viewport();
     let height = area.height.saturating_sub(2) as usize;
     let title_width = frozen_title_width(app.agent_title_width(), area.width as usize);
-    let headers = [
-        header("Title", false, "", title_width),
-        header("Agent Name", false, "", 20),
-        header("Nickname", false, "", 14),
-        header("Model", false, "", 14),
-        header("Effort", false, "", 10),
-        header("Role", false, "", 14),
-        header("Status", false, "", 12),
-        header("Tokens", false, "", 10),
-        header("ID", false, "", 12),
-    ];
+    let columns = agent_columns(title_width);
+    let headers = columns
+        .iter()
+        .map(|column| header(column.header, false, "", column.width))
+        .collect::<Vec<_>>();
     let mut lines = vec![Line::from(table_line(
         " ",
         &headers[0],
@@ -219,17 +198,11 @@ fn render_tree(frame: &mut Frame<'_>, app: &App, area: Rect) {
     {
         let branch = agent_branch(app.visible_agents(), index);
         let title = fit(&format!("{branch}{}", agent.title), title_width);
-        let rest = [
-            fit(&agent.task_name, 20),
-            fit(agent.nickname.as_deref().unwrap_or("unknown"), 14),
-            fit(agent.model.as_deref().unwrap_or("unknown"), 14),
-            fit(agent.effort.as_deref().unwrap_or("unknown"), 10),
-            fit(agent.role.as_deref().unwrap_or("unknown"), 14),
-            fit(agent.status.cue(), 12),
-            fit(&agent.tokens.compact(), 10),
-            fit(&short_id(&agent.id), 12),
-        ]
-        .join(" | ");
+        let rest = columns[1..]
+            .iter()
+            .map(|column| fit(&agent_cell(agent, column.key), column.width))
+            .collect::<Vec<_>>()
+            .join(" | ");
         let marker = if index == app.selected_agent_index() {
             ">"
         } else {
@@ -295,15 +268,10 @@ fn render_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let focus = if app.focus() == Focus::Detail {
-        " *"
-    } else {
-        ""
-    };
     let paragraph = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!("Selected Agent Detail{focus}")),
+            .title("Selected Agent Detail"),
     );
     frame.render_widget(
         if app.detail_wrap() {
@@ -349,7 +317,7 @@ fn status_lines(app: &App) -> String {
     let controls = match app.screen() {
         Screen::Conversations => "↑↓/jk Move  PgUp/PgDn Page  ←→ Scroll  Enter Open  s Sort  / Search  ? Help  q Quit",
         Screen::Help => "PgUp/PgDn Scroll  Esc/h Back  q Quit",
-        _ => "↑↓/jk Move  PgUp/PgDn Page  ←→ Scroll  Enter Open  Esc/h Back  Tab Pane  w Wrap  ? Help",
+        _ => "↑↓/jk Move  PgUp/PgDn Page  ←→ Scroll  Enter Open  Esc/h Back  [/] Title  w Wrap  ? Help",
     };
     let viewport = app.conversation_viewport();
     let total = app.approximate_total().unwrap_or(app.conversations().len());
@@ -412,6 +380,46 @@ fn agent_branch(agents: &[super::AgentItem], index: usize) -> String {
         "  ".repeat(agent.depth.saturating_sub(1) as usize),
         glyph
     )
+}
+
+fn root_cell(item: &super::ConversationItem, key: ColumnKey) -> String {
+    match key {
+        ColumnKey::Project => item.project.name().into(),
+        ColumnKey::Tokens => item.tokens.compact(),
+        ColumnKey::Updated => display_time(&item.last_activity_at),
+        ColumnKey::State => item.state.clone(),
+        ColumnKey::Profile => item.profile.clone(),
+        ColumnKey::Agents => item.agent_count.to_string(),
+        ColumnKey::Depth => item.max_depth.to_string(),
+        ColumnKey::Model => item.model.clone().unwrap_or_else(|| "unknown".into()),
+        ColumnKey::Id => short_id(&item.id),
+        ColumnKey::Title
+        | ColumnKey::AgentName
+        | ColumnKey::Nickname
+        | ColumnKey::Effort
+        | ColumnKey::Role
+        | ColumnKey::Status => String::new(),
+    }
+}
+
+fn agent_cell(agent: &super::AgentItem, key: ColumnKey) -> String {
+    match key {
+        ColumnKey::AgentName => agent.task_name.clone(),
+        ColumnKey::Nickname => agent.nickname.clone().unwrap_or_else(|| "unknown".into()),
+        ColumnKey::Model => agent.model.clone().unwrap_or_else(|| "unknown".into()),
+        ColumnKey::Effort => agent.effort.clone().unwrap_or_else(|| "unknown".into()),
+        ColumnKey::Role => agent.role.clone().unwrap_or_else(|| "unknown".into()),
+        ColumnKey::Status => agent.status.cue().into(),
+        ColumnKey::Tokens => agent.tokens.compact(),
+        ColumnKey::Id => short_id(&agent.id),
+        ColumnKey::Title
+        | ColumnKey::Project
+        | ColumnKey::Updated
+        | ColumnKey::State
+        | ColumnKey::Profile
+        | ColumnKey::Agents
+        | ColumnKey::Depth => String::new(),
+    }
 }
 
 fn frozen_title_width(preferred: usize, area_width: usize) -> usize {
