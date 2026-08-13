@@ -142,7 +142,7 @@ fn render_sort_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
         30.min(area.width.saturating_sub(4)),
         9.min(area.height.saturating_sub(3)),
     );
-    let selected = app.preferences().sort;
+    let selected = app.sort_selection();
     let text = [
         Sort::Updated,
         Sort::Title,

@@ -257,6 +257,7 @@ pub struct App {
     detail_wrap: bool,
     sort_direction: SortDirection,
     sort_overlay: bool,
+    sort_selection: Sort,
 }
 
 impl App {
@@ -288,6 +289,7 @@ impl App {
             detail_wrap: true,
             sort_direction: SortDirection::Descending,
             sort_overlay: false,
+            sort_selection: Sort::Updated,
         }
     }
 
@@ -346,7 +348,9 @@ impl App {
                 }
                 Screen::Help => {}
             },
+            Event::Down if self.sort_overlay => self.move_sort_selection(true),
             Event::Down => return self.move_down(),
+            Event::Up if self.sort_overlay => self.move_sort_selection(false),
             Event::Up => {
                 self.move_up();
             }
@@ -381,6 +385,24 @@ impl App {
             }
             self.clamp_selection();
             return vec![];
+        }
+        if self.sort_overlay {
+            return match key {
+                'j' => {
+                    self.move_sort_selection(true);
+                    vec![]
+                }
+                'k' => {
+                    self.move_sort_selection(false);
+                    vec![]
+                }
+                '\n' => self.apply_sort(self.sort_selection),
+                's' => {
+                    self.sort_overlay = false;
+                    vec![]
+                }
+                _ => vec![],
+            };
         }
         match key {
             'q' => vec![Command::Quit],
@@ -425,6 +447,7 @@ impl App {
             }
             's' if self.screen == Screen::Conversations => {
                 self.sort_overlay = !self.sort_overlay;
+                self.sort_selection = self.preferences.sort;
                 vec![]
             }
             'w' if matches!(self.screen, Screen::Conversation | Screen::AgentDetail) => {
@@ -474,6 +497,9 @@ impl App {
                 query: self.search.clone(),
                 filter: self.preferences.filter,
             }];
+        }
+        if self.sort_overlay {
+            return self.apply_sort(self.sort_selection);
         }
         if let Some(page) = self.pending_snapshot.take() {
             self.replace_page(page);
@@ -732,6 +758,26 @@ impl App {
             direction: self.sort_direction,
         }]
     }
+    fn move_sort_selection(&mut self, down: bool) {
+        const SORTS: [Sort; 6] = [
+            Sort::Updated,
+            Sort::Title,
+            Sort::Agents,
+            Sort::Depth,
+            Sort::State,
+            Sort::Profile,
+        ];
+        let current = SORTS
+            .iter()
+            .position(|s| *s == self.sort_selection)
+            .unwrap_or(0);
+        let next = if down {
+            (current + 1) % SORTS.len()
+        } else {
+            (current + SORTS.len() - 1) % SORTS.len()
+        };
+        self.sort_selection = SORTS[next];
+    }
     fn replace_page(&mut self, page: Page<ConversationItem>) {
         self.conversations = page.items;
         self.next_cursor = page.next_cursor;
@@ -823,6 +869,9 @@ impl App {
     }
     pub fn sort_overlay(&self) -> bool {
         self.sort_overlay
+    }
+    pub fn sort_selection(&self) -> Sort {
+        self.sort_selection
     }
     pub fn is_narrow(&self) -> bool {
         self.width < 90

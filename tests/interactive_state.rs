@@ -94,6 +94,23 @@ fn horizontal_scroll_sort_and_navigation_stack_preserve_browse_state() {
 }
 
 #[test]
+fn keyboard_sort_overlay_selects_a_field_and_toggles_its_direction() {
+    let mut app = App::new(Preferences::default());
+    app.update(Event::Key('s'));
+    assert!(app.sort_overlay());
+    app.update(Event::Down);
+    assert_eq!(app.sort_selection(), Sort::Title);
+    assert_eq!(
+        app.update(Event::Enter),
+        vec![Command::Sort {
+            field: Sort::Title,
+            direction: SortDirection::Ascending
+        }]
+    );
+    assert!(!app.sort_overlay());
+}
+
+#[test]
 fn detail_and_source_actions_are_not_dropped() {
     let mut app = App::new(Preferences::default());
     app.update(Event::ConversationsLoaded(Page {
