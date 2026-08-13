@@ -153,7 +153,10 @@ fn index_refresh_status_and_rebuild_use_discovered_rollouts() {
         .assert()
         .success()
         .stdout(predicate::str::contains("conversations: 1"))
-        .stdout(predicate::str::contains("agents: 2"));
+        .stdout(predicate::str::contains("agents: 2"))
+        .stdout(predicate::str::contains("projection_version: 2"))
+        .stdout(predicate::str::contains("required_projection_version: 2"))
+        .stdout(predicate::str::contains("needs_reprojection: false"));
     Command::cargo_bin("codex-spawns")
         .unwrap()
         .args(["index", "rebuild"])

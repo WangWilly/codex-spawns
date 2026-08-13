@@ -377,7 +377,12 @@ fn refresh_worker(
     if rebuild {
         index.reset().map_err(|e| e.to_string())?;
     }
-    let (changed_files, changed_dbs) = changed_sources(&index, &files, &dbs)?;
+    let reproject = index.needs_reprojection().map_err(|e| e.to_string())?;
+    let (changed_files, changed_dbs) = if reproject {
+        (files.clone(), dbs.clone())
+    } else {
+        changed_sources(&index, &files, &dbs)?
+    };
     let scan =
         codex_spawns::scan_sources(&changed_files, &changed_dbs).map_err(|e| e.to_string())?;
     sender
@@ -387,9 +392,14 @@ fn refresh_worker(
         })
         .map_err(|_| "interactive refresh was cancelled".to_string())?;
     let batch = refresh_batch(&scan, &files, &dbs)?;
-    index.refresh(batch, |_| {}).map_err(|e| e.to_string())?;
+    apply_refresh(&mut index, batch, reproject)?;
     let page = index
-        .browse(&ConversationFilter::default(), None, 25)
+        .browse_ordered(
+            &ConversationFilter::default(),
+            None,
+            25,
+            BrowseOrder::default(),
+        )
         .map_err(|e| e.to_string())?;
     sender
         .send(WorkerEvent::Ready(page))
@@ -614,10 +624,12 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
             let index = ProfileIndex::open(IndexOptions { path: path.clone() })
                 .map_err(|e| e.to_string())?;
             let stats = index.stats().map_err(|e| e.to_string())?;
+            let projection = index.projection_status().map_err(|e| e.to_string())?;
             println!(
-                "index: {}\nstatus: ready\nconversations: {}\nagents: {}\nsources: {}\nmissing_sources: {}",
+                "index: {}\nstatus: ready\nconversations: {}\nagents: {}\nsources: {}\nmissing_sources: {}\nprojection_version: {}\nrequired_projection_version: {}\nneeds_reprojection: {}",
                 path.display(),
-                stats.conversations, stats.agents, stats.sources, stats.missing_sources
+                stats.conversations, stats.agents, stats.sources, stats.missing_sources,
+                projection.current, projection.required, projection.needs_reprojection()
             );
         }
         IndexAction::Refresh | IndexAction::Rebuild => {
@@ -628,11 +640,16 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
             if rebuild {
                 index.reset().map_err(|e| e.to_string())?;
             }
-            let (changed_files, changed_dbs) = changed_sources(&index, &files, &dbs)?;
+            let reproject = index.needs_reprojection().map_err(|e| e.to_string())?;
+            let (changed_files, changed_dbs) = if reproject {
+                (files.clone(), dbs.clone())
+            } else {
+                changed_sources(&index, &files, &dbs)?
+            };
             let scan = codex_spawns::scan_sources(&changed_files, &changed_dbs)
                 .map_err(|e| e.to_string())?;
             let batch = refresh_batch(&scan, &files, &dbs)?;
-            index.refresh(batch, |_| {}).map_err(|e| e.to_string())?;
+            apply_refresh(&mut index, batch, reproject)?;
             let stats = index.stats().map_err(|e| e.to_string())?;
             println!(
                 "indexed: {} conversations, {} agents, {} sources",
@@ -650,6 +667,46 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
     }
     cleanup_ephemeral_index(common, &path);
     Ok(())
+}
+
+fn apply_refresh(
+    index: &mut ProfileIndex,
+    batch: RefreshBatch,
+    reproject: bool,
+) -> Result<(), String> {
+    if reproject {
+        let semantics = projection_semantics(&batch);
+        index
+            .complete_reprojection(
+                ProfileIndex::required_projection_version(),
+                batch,
+                &semantics,
+                |_| {},
+            )
+            .map_err(|e| e.to_string())
+    } else {
+        index.refresh(batch, |_| {}).map_err(|e| e.to_string())
+    }
+}
+
+fn projection_semantics(batch: &RefreshBatch) -> Vec<codex_spawns::index::ConversationSemantics> {
+    batch
+        .conversations
+        .iter()
+        .map(|conversation| codex_spawns::index::ConversationSemantics {
+            id: conversation.id.clone(),
+            state: if conversation.archived {
+                ConversationState::Archived
+            } else {
+                ConversationState::Active
+            },
+            profile: if conversation.profile_complete {
+                ProfileQuality::Complete
+            } else {
+                ProfileQuality::Partial
+            },
+        })
+        .collect()
 }
 
 pub(crate) fn refresh_batch(
@@ -716,9 +773,15 @@ pub(crate) fn refresh_batch(
             title_source: if root.title.value.is_some() {
                 "official"
             } else if root.first_user_message.value.is_some() {
-                "first-user-message"
+                "user message"
+            } else if Path::new(&cwd)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| !value.is_empty())
+            {
+                "cwd/time"
             } else {
-                "derived"
+                "id"
             }
             .into(),
             cwd,
@@ -996,6 +1059,48 @@ mod tests {
                 .unwrap()
                 .0,
             vec![rollout]
+        );
+    }
+
+    #[test]
+    fn stale_projection_is_completed_with_semantic_rows_in_one_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut index = ProfileIndex::open(IndexOptions {
+            path: dir.path().join("index.sqlite"),
+        })
+        .unwrap();
+        assert!(index.needs_reprojection().unwrap());
+        let conversation = ConversationRecord {
+            id: "root".into(),
+            title: "Readable title".into(),
+            title_source: "user message".into(),
+            cwd: "/work".into(),
+            created_at: "2026-08-13T01:00:00Z".into(),
+            last_activity_at: "2026-08-13T02:00:00Z".into(),
+            archived: true,
+            model: None,
+            status: None,
+            agent_count: 0,
+            max_depth: 0,
+            profile_complete: false,
+        };
+        apply_refresh(
+            &mut index,
+            RefreshBatch {
+                conversations: vec![conversation],
+                discovered_all_sources: true,
+                ..Default::default()
+            },
+            true,
+        )
+        .unwrap();
+        assert!(!index.needs_reprojection().unwrap());
+        let page = index
+            .browse(&ConversationFilter::default(), None, 25)
+            .unwrap();
+        assert_eq!(
+            page.semantics.get("root"),
+            Some(&(ConversationState::Archived, ProfileQuality::Partial))
         );
     }
 
