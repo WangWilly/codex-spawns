@@ -1,0 +1,2 @@
+{"type":"session_meta","payload":{"id":"root-injected","timestamp":"2026-08-13T00:00:00Z","cwd":"/repo"}}
+{"type":"response_item","payload":{"role":"user","content":[{"text":"<skill>\ninternal skill instructions\n</skill>"},{"text":"# AGENTS.md instructions\ninternal agent instructions"}]}}

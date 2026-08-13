@@ -1,4 +1,5 @@
 use crate::domain::*;
+use crate::projection::project_user_message;
 use serde_json::{Map, Value};
 use std::{
     collections::HashMap,
@@ -108,7 +109,11 @@ pub fn parse_rollout(path: impl AsRef<Path>) -> Result<ParsedRollout, ParseError
             && (payload.get("role").and_then(Value::as_str) == Some("user")
                 || kind == "user_message")
         {
-            if let Some(message) = text(payload.get("content").or_else(|| payload.get("message"))) {
+            if let Some(message) = payload
+                .get("content")
+                .or_else(|| payload.get("message"))
+                .and_then(project_user_message)
+            {
                 meta.first_user_message = Some((message, line));
             }
         }

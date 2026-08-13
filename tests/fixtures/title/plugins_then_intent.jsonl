@@ -1,0 +1,2 @@
+{"type":"session_meta","payload":{"id":"root-plugin","timestamp":"2026-08-13T00:00:00Z","cwd":"/repo"}}
+{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"<recommended_plugins>\nHere is a list of plugins that are available but not installed.\n</recommended_plugins>"},{"type":"input_text","text":"目前的交互是 command 模式，我想改成 Interactive 模式"}]}}
