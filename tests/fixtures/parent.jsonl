@@ -1,0 +1,4 @@
+{"timestamp":"2026-08-05T01:00:00Z","type":"session_meta","payload":{"id":"01900000-0000-7000-8000-000000000001","timestamp":"2026-08-05T01:00:00Z","cwd":"/repo","source":"cli","cli_version":"0.1.0-test"}}
+{"timestamp":"2026-08-05T01:01:00Z","type":"turn_context","payload":{"model":"gpt-parent","effort":"high"}}
+{"timestamp":"2026-08-05T01:02:00Z","type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"call-1","arguments":"{\"task_name\":\"repo-scout\",\"message\":\"Inspect the repository.\",\"agent_type\":\"explorer\",\"model\":\"gpt-requested\",\"reasoning_effort\":\"low\",\"fork_turns\":\"none\"}"}}
+{"timestamp":"2026-08-05T01:02:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"{\"agent_id\":\"01900000-0000-7000-8000-000000000002\",\"nickname\":\"Scout\"}"}}
