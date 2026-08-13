@@ -130,6 +130,8 @@ pub struct SpawnAttempt {
     pub depth: ProfileFact<u32>,
     pub output_error: ProfileFact<String>,
     pub state_status: ProfileFact<String>,
+    pub call_id: Option<String>,
+    pub output_line: Option<u64>,
     pub evidence: Vec<SourceRef>,
 }
 

@@ -29,6 +29,60 @@ fn explicit_list_emits_stable_json_without_messages() {
     assert_eq!(value["count"], 1);
     assert_eq!(value["records"][0]["task_name"], "repo-scout");
     assert!(value["records"][0].get("message").is_none());
+    assert_eq!(value["records"][0]["parent_cwd"], "/repo");
+    assert_eq!(value["records"][0]["child_cwd"], "/repo");
+    assert_eq!(value["records"][0]["call_id"], "call-1");
+    assert_eq!(value["records"][0]["parent_line"], 3);
+    assert_eq!(value["records"][0]["output_line"], 4);
+    assert_eq!(value["records"][0]["multi_agent_version"], "v2");
+}
+
+#[test]
+fn legacy_time_and_cwd_filters_are_applied() {
+    let common = [
+        "list",
+        "--file",
+        &fixture("parent.jsonl"),
+        "--file",
+        &fixture("child.jsonl"),
+        "--no-state-db",
+        "--format",
+        "json",
+    ];
+    let included = Command::cargo_bin("codex-spawns")
+        .unwrap()
+        .args(common)
+        .args([
+            "--cwd",
+            "/repo",
+            "--since",
+            "2026-08-05T01:02:00Z",
+            "--until",
+            "2026-08-05T01:02:00Z",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&included).unwrap()["count"],
+        1
+    );
+
+    let excluded = Command::cargo_bin("codex-spawns")
+        .unwrap()
+        .args(common)
+        .args(["--cwd", "/different", "--since", "2026-08-05T01:02:01Z"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&excluded).unwrap()["count"],
+        0
+    );
 }
 
 #[test]

@@ -429,15 +429,13 @@ fn attempt_from_call(c: &ParsedSpawnCall, child: Option<&AgentSession>) -> Spawn
     let child_id = c.child_ids.first().cloned();
     let failed = c.output_error.is_some() && child.is_none();
     SpawnAttempt {
-        id: blake3::hash(
-            format!(
-                "{:?}:{:?}:{}:{:?}",
-                c.parent_id, c.call_id, c.line, child_id
-            )
-            .as_bytes(),
-        )
-        .to_hex()
-        .to_string(),
+        id: format!(
+            "call:{}:{}:{}:{}",
+            c.parent_id.as_deref().unwrap_or("unknown"),
+            c.call_id.as_deref().unwrap_or("unknown"),
+            c.line,
+            child_id.as_deref().unwrap_or("pending")
+        ),
         status: if failed {
             SpawnStatus::Failed
         } else if child.is_some() || child_id.is_some() {
@@ -477,6 +475,8 @@ fn attempt_from_call(c: &ParsedSpawnCall, child: Option<&AgentSession>) -> Spawn
             .unwrap_or_else(ProfileFact::unknown),
         output_error: call_fact(c, c.output_error.clone()),
         state_status: ProfileFact::unknown(),
+        call_id: c.call_id.clone(),
+        output_line: c.output_line,
         evidence: vec![source(&c.path, c.line)]
             .into_iter()
             .chain(c.output_line.map(|l| source(&c.path, l)))
@@ -506,6 +506,8 @@ fn attempt_from_agent(a: &AgentSession) -> SpawnAttempt {
         depth: a.depth.clone(),
         output_error: ProfileFact::unknown(),
         state_status: ProfileFact::unknown(),
+        call_id: None,
+        output_line: None,
         evidence: a.parent_thread_id.provenance.clone(),
     }
 }
@@ -607,6 +609,8 @@ fn merge_state(path: &Path, result: &mut ScanResult) -> Result<(), ParseError> {
                 state_status: status
                     .map(|s| ProfileFact::observed(s, src.clone()))
                     .unwrap_or_else(ProfileFact::unknown),
+                call_id: None,
+                output_line: None,
                 evidence: vec![src],
             })
         }

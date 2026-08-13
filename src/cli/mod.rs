@@ -55,6 +55,10 @@ pub struct Common {
     #[arg(long, global = true)]
     pub status: Option<String>,
     #[arg(long, global = true)]
+    pub since: Option<String>,
+    #[arg(long, global = true)]
+    pub until: Option<String>,
+    #[arg(long, global = true)]
     pub reverse: bool,
     #[arg(long, global = true)]
     pub no_cache: bool,
@@ -165,7 +169,7 @@ fn run_command(action: Action, common: &Common) -> Result<(), String> {
             }
             let values: Vec<_> = found
                 .iter()
-                .map(|r| attempt_json(r, common.include_message, evidence))
+                .map(|r| attempt_json(r, &scan, common.include_message, evidence))
                 .collect();
             print_values(&values, common.format)
         }
@@ -301,6 +305,25 @@ fn filtered<'a>(scan: &'a ScanResult, c: &Common) -> Vec<&'a SpawnAttempt> {
                 && c.status
                     .as_ref()
                     .is_none_or(|x| format!("{:?}", r.status).eq_ignore_ascii_case(x))
+                && c.cwd.as_ref().is_none_or(|wanted| {
+                    let wanted = Path::new(wanted);
+                    session_cwd(scan, r.parent_thread_id.as_deref())
+                        .into_iter()
+                        .chain(session_cwd(scan, r.child_thread_id.as_deref()))
+                        .any(|actual| Path::new(actual) == wanted)
+                })
+                && c.since.as_ref().is_none_or(|since| {
+                    r.created_at
+                        .value
+                        .as_ref()
+                        .is_some_and(|value| value >= since)
+                })
+                && c.until.as_ref().is_none_or(|until| {
+                    r.created_at
+                        .value
+                        .as_ref()
+                        .is_some_and(|value| value <= until)
+                })
         })
         .collect();
     v.sort_by_key(|r| r.created_at.value.clone());
@@ -313,8 +336,62 @@ fn filtered<'a>(scan: &'a ScanResult, c: &Common) -> Vec<&'a SpawnAttempt> {
     v
 }
 
-fn attempt_json(r: &SpawnAttempt, message: bool, evidence: bool) -> Value {
-    let mut v = json!({"id":r.id,"created_at":r.created_at.value,"status":format!("{:?}",r.status).to_lowercase(),"parent_thread_id":r.parent_thread_id,"child_thread_id":r.child_thread_id,"task_name":r.task_name.value,"message_excerpt":r.message.value.as_deref().map(|s| if s.chars().count()>120 {format!("{}…",s.chars().take(119).collect::<String>())} else{s.into()}),"agent_type":r.agent_type.value,"agent_role":r.agent_role.value,"agent_nickname":r.agent_nickname.value,"agent_path":r.agent_path.value,"requested_model":r.requested_model.value,"requested_effort":r.requested_effort.value,"fork_turns":r.fork_turns.value,"effective_model":r.effective_model.value,"effective_effort":r.effective_effort.value,"depth":r.depth.value,"output_error":r.output_error.value,"state_status":r.state_status.value});
+fn session_cwd<'a>(scan: &'a ScanResult, id: Option<&str>) -> Option<&'a str> {
+    let id = id?;
+    scan.root_conversations
+        .iter()
+        .find(|s| s.id == id)
+        .and_then(|s| s.cwd.value.as_deref())
+        .or_else(|| {
+            scan.agent_sessions
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| s.cwd.value.as_deref())
+        })
+}
+
+fn rollout_path(scan: &ScanResult, id: Option<&str>) -> Option<String> {
+    let id = id?;
+    scan.root_conversations
+        .iter()
+        .find(|s| s.id == id)
+        .map(|s| s.path.display().to_string())
+        .or_else(|| {
+            scan.agent_sessions
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.path.display().to_string())
+        })
+}
+
+fn attempt_json(r: &SpawnAttempt, scan: &ScanResult, message: bool, evidence: bool) -> Value {
+    let parent_line = r.evidence.iter().find_map(|source| match source {
+        codex_spawns::SourceRef::Rollout { line, .. } => *line,
+        _ => None,
+    });
+    let child = r
+        .child_thread_id
+        .as_deref()
+        .and_then(|id| scan.agent_sessions.iter().find(|s| s.id == id));
+    let child_line = child.and_then(|s| {
+        s.parent_thread_id
+            .provenance
+            .iter()
+            .find_map(|source| match source {
+                codex_spawns::SourceRef::Rollout { line, .. } => *line,
+                _ => None,
+            })
+    });
+    let state_source = r.evidence.iter().find_map(|source| match source {
+        codex_spawns::SourceRef::StateDatabase { path, .. } => Some(path.display().to_string()),
+        _ => None,
+    });
+    let source = if parent_line.is_some() {
+        "rollout"
+    } else {
+        "state"
+    };
+    let mut v = json!({"id":r.id,"created_at":r.created_at.value,"status":format!("{:?}",r.status).to_lowercase(),"parent_thread_id":r.parent_thread_id,"child_thread_id":r.child_thread_id,"parent_path":rollout_path(scan,r.parent_thread_id.as_deref()),"child_path":rollout_path(scan,r.child_thread_id.as_deref()),"parent_cwd":session_cwd(scan,r.parent_thread_id.as_deref()),"child_cwd":session_cwd(scan,r.child_thread_id.as_deref()),"task_name":r.task_name.value,"message_excerpt":r.message.value.as_deref().map(|s| if s.chars().count()>180 {format!("{}…",s.chars().take(179).collect::<String>())} else{s.into()}),"agent_type":r.agent_type.value,"agent_role":r.agent_role.value,"agent_nickname":r.agent_nickname.value,"agent_path":r.agent_path.value,"requested_model":r.requested_model.value,"requested_effort":r.requested_effort.value,"fork_turns":r.fork_turns.value,"effective_model":r.effective_model.value,"effective_effort":r.effective_effort.value,"multi_agent_version":child.and_then(|s|s.multi_agent_version.value.as_deref()),"depth":r.depth.value,"source":source,"call_id":r.call_id,"parent_line":parent_line,"child_line":child_line,"output_line":r.output_line,"output_error":r.output_error.value,"state_status":r.state_status.value,"state_source":state_source});
     if message {
         v["message"] = json!(r.message.value)
     }
@@ -330,7 +407,7 @@ fn print_attempts(
 ) -> Result<(), String> {
     let values: Vec<_> = records
         .iter()
-        .map(|r| attempt_json(r, c.include_message, false))
+        .map(|r| attempt_json(r, scan, c.include_message, false))
         .collect();
     match c.format {Format::Json=>println!("{}",serde_json::to_string_pretty(&json!({"records":values,"count":values.len(),"scanned_rollout_files":scan.rollout_files.len(),"diagnostics":scan.diagnostics})).unwrap()), _=>return print_values(&values,c.format)}
     Ok(())
