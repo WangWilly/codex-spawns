@@ -183,9 +183,14 @@ pub enum SortDirection {
 pub struct Viewport {
     pub row: usize,
     pub column: usize,
+    pub cursor_column: usize,
     pub height: usize,
     pub width: usize,
 }
+
+const ROOT_MOVING_COLUMN_WIDTHS: [usize; 9] = [18, 10, 16, 10, 10, 6, 5, 14, 12];
+const AGENT_MOVING_COLUMN_WIDTHS: [usize; 8] = [20, 14, 14, 10, 14, 12, 10, 12];
+const COLUMN_SEPARATOR_WIDTH: usize = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Preferences {
@@ -501,10 +506,11 @@ impl App {
                         &mut self.conversation_viewport,
                     );
                 }
-                Screen::Conversation | Screen::AgentDetail => {
+                Screen::Conversation => {
                     self.agent_selection = min(index, self.agents.len().saturating_sub(1));
                     Self::follow_selection(self.agent_selection, &mut self.tree_viewport);
                 }
+                Screen::AgentDetail => {}
                 Screen::Help => {}
             },
             Event::MouseDoubleClick { index } | Event::MouseOpen { index } => {
@@ -517,10 +523,11 @@ impl App {
                             &mut self.conversation_viewport,
                         );
                     }
-                    Screen::Conversation | Screen::AgentDetail => {
+                    Screen::Conversation => {
                         self.agent_selection = min(index, self.agents.len().saturating_sub(1));
                         Self::follow_selection(self.agent_selection, &mut self.tree_viewport);
                     }
+                    Screen::AgentDetail => return vec![],
                     Screen::Help => {}
                 }
                 return self.enter();
@@ -537,10 +544,10 @@ impl App {
             Event::PageDown => return self.move_page(true),
             Event::Home => self.move_home(),
             Event::End => self.move_end(),
-            Event::ScrollLeft => self.scroll_horizontal(false, false),
-            Event::ScrollRight => self.scroll_horizontal(true, false),
-            Event::ScrollLeftPage => self.scroll_horizontal(false, true),
-            Event::ScrollRightPage => self.scroll_horizontal(true, true),
+            Event::ScrollLeft => self.move_horizontal(false, false),
+            Event::ScrollRight => self.move_horizontal(true, false),
+            Event::ScrollLeftPage => self.move_horizontal(false, true),
+            Event::ScrollRightPage => self.move_horizontal(true, true),
             Event::Tab if !self.is_narrow() => self.focus = Focus::Detail,
             Event::BackTab if !self.is_narrow() => self.focus = Focus::Tree,
             Event::Enter => return self.enter(),
@@ -640,11 +647,11 @@ impl App {
                 vec![]
             }
             'H' => {
-                self.scroll_horizontal(false, false);
+                self.move_horizontal(false, false);
                 vec![]
             }
             'L' => {
-                self.scroll_horizontal(true, false);
+                self.move_horizontal(true, false);
                 vec![]
             }
             '[' if self.screen == Screen::Conversations => {
@@ -853,10 +860,17 @@ impl App {
         viewport.height = height.max(1);
         match self.screen {
             Screen::Conversations => {
-                Self::follow_selection(self.conversation_selection, &mut self.conversation_viewport)
+                Self::follow_selection(
+                    self.conversation_selection,
+                    &mut self.conversation_viewport,
+                );
+                self.clamp_conversation_columns();
             }
             Screen::Conversation => {
-                Self::follow_selection(self.agent_selection, &mut self.tree_viewport)
+                Self::follow_selection(self.agent_selection, &mut self.tree_viewport);
+                if self.focus == Focus::Tree {
+                    self.clamp_agent_columns();
+                }
             }
             _ => {}
         }
@@ -940,7 +954,36 @@ impl App {
             _ => {}
         }
     }
-    fn scroll_horizontal(&mut self, right: bool, page: bool) {
+    fn move_horizontal(&mut self, right: bool, page: bool) {
+        match self.screen {
+            Screen::Conversations => {
+                let frozen = self.root_title_width().saturating_add(4);
+                move_table_column(
+                    &mut self.conversation_viewport,
+                    frozen,
+                    &ROOT_MOVING_COLUMN_WIDTHS,
+                    right,
+                    page,
+                );
+            }
+            Screen::Conversation if self.focus == Focus::Tree => {
+                let frozen = self.agent_title_width().saturating_add(4);
+                move_table_column(
+                    &mut self.tree_viewport,
+                    frozen,
+                    &AGENT_MOVING_COLUMN_WIDTHS,
+                    right,
+                    page,
+                );
+            }
+            Screen::Conversation | Screen::AgentDetail => {
+                self.scroll_detail_horizontal(right, page)
+            }
+            Screen::Help => self.scroll_detail_horizontal(right, page),
+        }
+    }
+
+    fn scroll_detail_horizontal(&mut self, right: bool, page: bool) {
         let viewport = self.active_viewport_mut();
         let amount = if page { viewport.width.max(1) } else { 4 };
         viewport.column = if right {
@@ -948,6 +991,20 @@ impl App {
         } else {
             viewport.column.saturating_sub(amount)
         };
+    }
+
+    fn clamp_conversation_columns(&mut self) {
+        let frozen = self.root_title_width().saturating_add(4);
+        clamp_table_column(
+            &mut self.conversation_viewport,
+            frozen,
+            &ROOT_MOVING_COLUMN_WIDTHS,
+        );
+    }
+
+    fn clamp_agent_columns(&mut self) {
+        let frozen = self.agent_title_width().saturating_add(4);
+        clamp_table_column(&mut self.tree_viewport, frozen, &AGENT_MOVING_COLUMN_WIDTHS);
     }
     fn apply_sort(&mut self, field: Sort) -> Vec<Command> {
         self.sort_overlay = false;
@@ -1165,8 +1222,27 @@ impl App {
     pub fn conversation_viewport(&self) -> Viewport {
         self.conversation_viewport
     }
+    pub fn conversation_focused_column(&self) -> usize {
+        self.conversation_viewport.cursor_column
+    }
+    pub fn conversation_column_cursor(&self) -> usize {
+        self.conversation_focused_column()
+    }
     pub fn tree_viewport(&self) -> Viewport {
         self.tree_viewport
+    }
+    pub fn agent_focused_column(&self) -> usize {
+        self.tree_viewport.cursor_column
+    }
+    pub fn agent_column_cursor(&self) -> usize {
+        self.agent_focused_column()
+    }
+    pub fn focused_column(&self) -> usize {
+        match self.screen {
+            Screen::Conversations => self.conversation_focused_column(),
+            Screen::Conversation if self.focus == Focus::Tree => self.agent_focused_column(),
+            _ => self.detail_viewport.cursor_column,
+        }
     }
     pub fn detail_viewport(&self) -> Viewport {
         self.detail_viewport
@@ -1218,5 +1294,89 @@ impl App {
             .map(|c| c.title.as_str())
             .unwrap_or("Unknown");
         format!("Conversations / {title} / {id}")
+    }
+}
+
+fn column_starts(widths: &[usize]) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(widths.len());
+    let mut offset = 0;
+    for width in widths {
+        starts.push(offset);
+        offset += *width + COLUMN_SEPARATOR_WIDTH;
+    }
+    starts
+}
+
+fn visible_column_range(offset: usize, capacity: usize, widths: &[usize]) -> (usize, usize) {
+    let starts = column_starts(widths);
+    let first = starts
+        .iter()
+        .rposition(|start| *start <= offset)
+        .unwrap_or(0);
+    let edge = offset.saturating_add(capacity.max(1));
+    let mut last = first;
+    for (index, start) in starts.iter().enumerate().skip(first + 1) {
+        if *start < edge {
+            last = index;
+        } else {
+            break;
+        }
+    }
+    (first, last)
+}
+
+fn clamp_table_column(viewport: &mut Viewport, frozen: usize, widths: &[usize]) {
+    let starts = column_starts(widths);
+    let capacity = viewport.width.saturating_sub(frozen);
+    viewport.cursor_column = viewport.cursor_column.min(widths.len().saturating_sub(1));
+    viewport.column = viewport.column.min(starts.last().copied().unwrap_or(0));
+    let (first, last) = visible_column_range(viewport.column, capacity, widths);
+    viewport.column = starts[first];
+    if viewport.cursor_column < first {
+        viewport.cursor_column = first;
+    }
+    if viewport.cursor_column > last {
+        viewport.cursor_column = last;
+    }
+}
+
+fn move_table_column(
+    viewport: &mut Viewport,
+    frozen: usize,
+    widths: &[usize],
+    right: bool,
+    page: bool,
+) {
+    if widths.is_empty() {
+        return;
+    }
+    let starts = column_starts(widths);
+    let capacity = viewport.width.saturating_sub(frozen).max(1);
+    clamp_table_column(viewport, frozen, widths);
+    let (first, last) = visible_column_range(viewport.column, capacity, widths);
+    if page {
+        if right {
+            let next = (last + 1).min(widths.len() - 1);
+            viewport.column = starts[next];
+            viewport.cursor_column = next;
+        } else if first > 0 {
+            let previous = first - 1;
+            viewport.column = starts[previous];
+            viewport.cursor_column = previous;
+        }
+        return;
+    }
+    if right {
+        if viewport.cursor_column < last {
+            viewport.cursor_column += 1;
+        } else if last + 1 < widths.len() {
+            viewport.cursor_column += 1;
+            viewport.column = starts[viewport.cursor_column];
+        }
+    } else if viewport.cursor_column > first {
+        viewport.cursor_column -= 1;
+    } else if first > 0 {
+        viewport.cursor_column -= 1;
+        viewport.column = starts[viewport.cursor_column];
     }
 }

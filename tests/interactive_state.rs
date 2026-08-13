@@ -76,7 +76,8 @@ fn horizontal_scroll_sort_and_navigation_stack_preserve_browse_state() {
     });
     app.update(Event::Down);
     app.update(Event::ScrollRight);
-    assert_eq!(app.conversation_viewport().column, 4);
+    assert_eq!(app.conversation_focused_column(), 1);
+    assert_eq!(app.conversation_viewport().column, 21);
     assert_eq!(
         app.update(Event::SelectSort(Sort::Title)),
         vec![Command::Sort {
@@ -96,7 +97,8 @@ fn horizontal_scroll_sort_and_navigation_stack_preserve_browse_state() {
     app.update(Event::Back);
     assert_eq!(app.screen(), Screen::Conversations);
     assert_eq!(app.selected_conversation_index(), 1);
-    assert_eq!(app.conversation_viewport().column, 4);
+    assert_eq!(app.conversation_focused_column(), 1);
+    assert_eq!(app.conversation_viewport().column, 21);
 }
 
 #[test]
@@ -515,4 +517,43 @@ fn root_and_agent_title_width_preferences_round_trip_independently() {
     let decoded = Preferences::from_toml_like(&preferences.to_toml_like());
     assert_eq!(decoded.root_title_width, 28);
     assert_eq!(decoded.agent_title_width, 64);
+}
+
+#[test]
+fn horizontal_cursor_reveals_one_complete_column_at_table_edges() {
+    let mut app = App::new(Preferences::default());
+    app.update(Event::ConversationsLoaded(Page {
+        items: vec![conversation("one", "One")],
+        next_cursor: None,
+        approximate_total: None,
+    }));
+    app.update(Event::SetViewport {
+        width: 75,
+        height: 4,
+    });
+    assert_eq!(app.conversation_focused_column(), 0);
+    app.update(Event::ScrollRight);
+    assert_eq!(
+        (
+            app.conversation_focused_column(),
+            app.conversation_viewport().column
+        ),
+        (1, 0)
+    );
+    app.update(Event::ScrollRight);
+    assert_eq!(
+        (
+            app.conversation_focused_column(),
+            app.conversation_viewport().column
+        ),
+        (2, 34)
+    );
+    app.update(Event::ScrollLeft);
+    assert_eq!(
+        (
+            app.conversation_focused_column(),
+            app.conversation_viewport().column
+        ),
+        (1, 21)
+    );
 }
