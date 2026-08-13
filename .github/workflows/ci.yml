@@ -36,7 +36,7 @@ jobs:
         run: |
           if test -z "$BASE_SHA" || test "$BASE_SHA" = "0000000000000000000000000000000000000000"; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$BASE_SHA" HEAD -- 'src/**' Cargo.toml Cargo.lock install.sh '.github/workflows/**'; then
+          elif git diff --quiet "$BASE_SHA" HEAD -- 'src/**' Cargo.toml Cargo.lock rust-toolchain.toml install.sh scripts/package-release.sh '.github/workflows/**'; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
