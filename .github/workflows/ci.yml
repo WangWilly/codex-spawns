@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  detect-release-changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      changed: ${{ steps.paths.outputs.changed }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - id: paths
+        name: Detect release-related paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if test -z "$BASE_SHA" || test "$BASE_SHA" = "0000000000000000000000000000000000000000"; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$BASE_SHA" HEAD -- 'src/**' Cargo.toml Cargo.lock install.sh '.github/workflows/**'; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  release-builds:
+    needs: [checks, detect-release-changes]
+    if: needs.detect-release-changes.outputs.changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            builder: cargo
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            builder: cargo
+          - os: ubuntu-24.04
+            target: aarch64-unknown-linux-musl
+            builder: cargo-zigbuild
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            builder: cargo-zigbuild
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Add Rust target
+        run: rustup target add "${{ matrix.target }}"
+      - name: Install pinned Zig toolchain
+        if: runner.os == 'Linux'
+        run: |
+          python3 -m pip install --user ziglang==0.13.0
+          zig_path=$(python3 -c 'import pathlib, ziglang; print(pathlib.Path(ziglang.__file__).parent / "zig")')
+          ln -s "$zig_path" "$HOME/.cargo/bin/zig"
+          zig version
+      - name: Install pinned cargo-zigbuild
+        if: runner.os == 'Linux'
+        run: cargo install cargo-zigbuild --version 0.20.1 --locked
+      - name: Build release binary
+        run: ${{ matrix.builder }} build --release --target "${{ matrix.target }}"
+      - name: Smoke test native x86 binary
+        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'x86_64-apple-darwin'
+        run: "target/${{ matrix.target }}/release/codex-spawns --version"
+      - name: Package release archive
+        env:
+          GIT_COMMIT_SHA: ${{ github.sha }}
+        run: scripts/package-release.sh "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)" "${{ matrix.target }}" "target/${{ matrix.target }}/release/codex-spawns" dist
+      - name: Upload short-lived release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: codex-spawns-${{ matrix.target }}
+          path: dist/codex-spawns-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7

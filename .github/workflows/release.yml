@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - id: version
+        name: Require tag and Cargo version to match
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          if test "$TAG" != "v$version"; then
+            echo "tag/version mismatch: tag=$TAG Cargo.toml=$version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            builder: cargo
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            builder: cargo
+          - os: ubuntu-24.04
+            target: aarch64-unknown-linux-musl
+            builder: cargo-zigbuild
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            builder: cargo-zigbuild
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: rustup target add "${{ matrix.target }}"
+      - name: Install pinned Zig toolchain
+        if: runner.os == 'Linux'
+        run: |
+          python3 -m pip install --user ziglang==0.13.0
+          zig_path=$(python3 -c 'import pathlib, ziglang; print(pathlib.Path(ziglang.__file__).parent / "zig")')
+          ln -s "$zig_path" "$HOME/.cargo/bin/zig"
+          zig version
+      - name: Install pinned cargo-zigbuild
+        if: runner.os == 'Linux'
+        run: cargo install cargo-zigbuild --version 0.20.1 --locked
+      - run: ${{ matrix.builder }} build --release --target "${{ matrix.target }}"
+      - name: Smoke test native x86 binary
+        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'x86_64-apple-darwin'
+        run: "target/${{ matrix.target }}/release/codex-spawns --version"
+      - name: Package release archive
+        env:
+          GIT_COMMIT_SHA: ${{ github.sha }}
+        run: scripts/package-release.sh "${{ needs.validate.outputs.version }}" "${{ matrix.target }}" "target/${{ matrix.target }}/release/codex-spawns" dist
+      - name: Upload packaged target
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: codex-spawns-${{ matrix.target }}
+          path: dist/codex-spawns-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  draft-release:
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Download packaged targets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: codex-spawns-*
+          path: dist
+          merge-multiple: true
+      - name: Create aggregate checksums
+        working-directory: dist
+        run: sha256sum codex-spawns-*.tar.gz > SHA256SUMS
+      - name: Add version-bound installer
+        run: cp install.sh dist/install.sh
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            dist/codex-spawns-*.tar.gz dist/SHA256SUMS dist/install.sh \
+            --draft --generate-notes --verify-tag \
+            --title "codex-spawns ${{ github.ref_name }}"
