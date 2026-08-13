@@ -95,10 +95,6 @@ pub fn parse_rollout(path: impl AsRef<Path>) -> Result<ParsedRollout, ParseError
         let Some(event_obj) = event.as_object() else {
             continue;
         };
-        meta.events += 1;
-        if let Some(timestamp) = text(event_obj.get("timestamp")) {
-            meta.last_event_at = Some((timestamp, line));
-        }
         let payload = event_obj
             .get("payload")
             .and_then(Value::as_object)
@@ -108,6 +104,13 @@ pub fn parse_rollout(path: impl AsRef<Path>) -> Result<ParsedRollout, ParseError
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or(top_kind);
+        if top_kind == "session_meta" && session_identity_conflicts(&meta, payload) {
+            continue;
+        }
+        meta.events += 1;
+        if let Some(timestamp) = text(event_obj.get("timestamp")) {
+            meta.last_event_at = Some((timestamp, line));
+        }
         if meta.first_user_message.is_none()
             && (payload.get("role").and_then(Value::as_str) == Some("user")
                 || kind == "user_message")
@@ -388,6 +391,13 @@ fn update_session(m: &mut Meta, p: &Map<String, Value>, line: u64) {
     if m.parent.is_some() {
         m.subagent = true
     }
+}
+
+fn session_identity_conflicts(m: &Meta, p: &Map<String, Value>) -> bool {
+    text(p.get("id").or_else(|| p.get("session_id")))
+        .as_ref()
+        .zip(m.id.as_ref())
+        .is_some_and(|(incoming, established)| incoming != established)
 }
 
 fn rollout_id_from_path(path: &Path) -> Option<String> {

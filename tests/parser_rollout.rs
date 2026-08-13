@@ -18,9 +18,9 @@ fn rollout_identity_is_not_overwritten_by_inherited_session_metadata() {
     fs::write(
         &rollout,
         concat!(
-            r#"{"type":"session_meta","payload":{"id":"019eece4-3a1b-7713-8f99-77d716fe2703","timestamp":"2026-08-13T00:00:00Z","cwd":"/current"}}"#,
+            r#"{"timestamp":"2026-08-13T00:00:00Z","type":"session_meta","payload":{"id":"019eece4-3a1b-7713-8f99-77d716fe2703","timestamp":"2026-08-13T00:00:00Z","cwd":"/current"}}"#,
             "\n",
-            r#"{"type":"session_meta","payload":{"id":"019eecb6-8910-7603-b48a-998b04738e31","timestamp":"2026-08-12T00:00:00Z","cwd":"/inherited"}}"#,
+            r#"{"timestamp":"2026-08-14T00:00:00Z","type":"session_meta","payload":{"id":"019eecb6-8910-7603-b48a-998b04738e31","timestamp":"2026-08-12T00:00:00Z","cwd":"/inherited"}}"#,
             "\n"
         ),
     )
@@ -35,6 +35,10 @@ fn rollout_identity_is_not_overwritten_by_inherited_session_metadata() {
     assert_eq!(
         result.root_conversations[0].cwd.value.as_deref(),
         Some("/current")
+    );
+    assert_eq!(
+        result.root_conversations[0].last_event_at.value.as_deref(),
+        Some("2026-08-13T00:00:00Z")
     );
 }
 
