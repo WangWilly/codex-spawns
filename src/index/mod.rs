@@ -5,7 +5,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -24,6 +24,8 @@ pub enum IndexError {
     InvalidCursor,
     #[error("refresh rejected: {0}")]
     RefreshRejected(String),
+    #[error("duplicate conversation id in refresh batch: {0}")]
+    DuplicateConversationId(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -258,6 +260,12 @@ impl ProfileIndex {
     where
         F: FnMut(RefreshEvent),
     {
+        let mut conversation_ids = HashSet::with_capacity(batch.conversations.len());
+        for conversation in &batch.conversations {
+            if !conversation_ids.insert(&conversation.id) {
+                return Err(IndexError::DuplicateConversationId(conversation.id.clone()));
+            }
+        }
         emit(RefreshEvent::Started);
         let tx = self.conn.transaction()?;
         apply_batch(&tx, &batch, &mut emit)?;

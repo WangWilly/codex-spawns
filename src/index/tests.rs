@@ -638,6 +638,31 @@ fn failed_refresh_rolls_back_the_entire_batch() {
 }
 
 #[test]
+fn duplicate_conversation_ids_are_rejected_before_sqlite_insertion() {
+    let (_dir, mut index) = open();
+    let result = index.refresh(
+        RefreshBatch {
+            conversations: vec![
+                conversation("duplicate", "2026-01-01"),
+                conversation("duplicate", "2026-01-02"),
+            ],
+            ..Default::default()
+        },
+        |_| {},
+    );
+
+    assert!(matches!(
+        result,
+        Err(IndexError::DuplicateConversationId(id)) if id == "duplicate"
+    ));
+    assert!(index
+        .browse(&ConversationFilter::default(), None, 25)
+        .unwrap()
+        .conversations
+        .is_empty());
+}
+
+#[test]
 fn profile_returns_the_complete_agent_tree_with_excerpts_only() {
     let (_dir, mut index) = open();
     let agent = AgentRecord {
