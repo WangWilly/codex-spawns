@@ -1,6 +1,7 @@
 use codex_spawns::index::{
     ConversationFilter, ConversationRecord, IndexOptions, ProfileIndex, RefreshBatch,
 };
+use codex_spawns::{ProfileFact, TokenUsageSummary};
 use std::time::{Duration, Instant};
 
 /// A dependency-free release-gate smoke benchmark. Run with
@@ -26,6 +27,8 @@ fn main() {
             agent_count: 2,
             max_depth: 1,
             profile_complete: true,
+            project: ProfileFact::unknown(),
+            tokens: TokenUsageSummary::default(),
         })
         .collect();
     index

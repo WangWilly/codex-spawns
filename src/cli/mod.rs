@@ -1,5 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use codex_spawns::{scan_sources, ScanResult, SpawnAttempt};
+use codex_spawns::{
+    load_app_metadata, scan_sources_with_app_metadata, AppMetadataPaths, ScanResult, SpawnAttempt,
+};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -203,11 +205,41 @@ fn run_command(action: Action, common: &Common) -> Result<(), String> {
 
 pub(crate) fn load(common: &Common) -> Result<ScanResult, String> {
     let (files, dbs) = discover(common)?;
-    scan_sources(&files, &dbs).map_err(|e| e.to_string())
+    Ok(scan_with_optional_app(common, &files, &dbs)?.0)
 }
 
-pub(crate) fn discover(common: &Common) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
-    let home = common
+pub(crate) fn app_metadata_paths(common: &Common) -> AppMetadataPaths {
+    let home = codex_home(common);
+    let primary = home.join("state_5.sqlite");
+    let nested = home.join("sqlite/state_5.sqlite");
+    AppMetadataPaths::new(
+        if primary.exists() { primary } else { nested },
+        home.join(".codex-global-state.json"),
+    )
+}
+
+pub(crate) fn scan_with_optional_app(
+    common: &Common,
+    files: &[PathBuf],
+    dbs: &[PathBuf],
+) -> Result<(ScanResult, bool), String> {
+    let paths = app_metadata_paths(common);
+    match load_app_metadata(&paths) {
+        Ok(app) => scan_sources_with_app_metadata(files, dbs, Some(&app))
+            .map(|scan| (scan, true))
+            .map_err(|e| e.to_string()),
+        Err(error) => {
+            let diagnostic = format!("App metadata unavailable: {error}");
+            let mut scan =
+                scan_sources_with_app_metadata(files, dbs, None).map_err(|e| e.to_string())?;
+            scan.diagnostics.push(diagnostic);
+            Ok((scan, false))
+        }
+    }
+}
+
+fn codex_home(common: &Common) -> PathBuf {
+    common
         .codex_home
         .clone()
         .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
@@ -216,7 +248,11 @@ pub(crate) fn discover(common: &Common) -> Result<(Vec<PathBuf>, Vec<PathBuf>), 
                 .map(PathBuf::from)
                 .unwrap_or_default()
                 .join(".codex")
-        });
+        })
+}
+
+pub(crate) fn discover(common: &Common) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
+    let home = codex_home(common);
     let mut files = common.files.clone();
     let roots = if common.sessions_dirs.is_empty() && common.files.is_empty() {
         let mut v = vec![home.join("sessions")];

@@ -6,7 +6,7 @@ use codex_spawns::{
         SortDirection as IndexSortDirection, SortField, SourceRecord,
     },
     interactive::{self, App, Command, Event, Page, Preferences},
-    ScanResult, SpawnStatus,
+    FactConfidence, ProfileFact, ProjectAssignment, ScanResult, SpawnStatus, TokenUsageSummary,
 };
 use crossterm::{
     event::{self, Event as TerminalEvent, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind},
@@ -192,11 +192,13 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
                                             task_name: a
                                                 .task_name
                                                 .unwrap_or_else(|| "unnamed agent".into()),
+                                            title: a.title,
                                             role: a.role,
                                             nickname: a.nickname,
                                             model: a.model,
                                             effort: a.effort,
                                             detail_loaded: false,
+                                            tokens: token_display(&a.tokens, 1, 1),
                                         })
                                         .collect(),
                                 });
@@ -279,6 +281,8 @@ fn app_browse_order(app: &App) -> BrowseOrder {
         field: match app.preferences().sort {
             Sort::Updated => SortField::Updated,
             Sort::Title => SortField::Title,
+            Sort::Project => SortField::Project,
+            Sort::Tokens => SortField::Tokens,
             Sort::Agents => SortField::Agents,
             Sort::Depth => SortField::Depth,
             Sort::State => SortField::State,
@@ -444,15 +448,29 @@ fn refresh_worker(
     } else {
         changed_sources(&index, &files, &dbs)?
     };
-    let scan =
-        codex_spawns::scan_sources(&changed_files, &changed_dbs).map_err(|e| e.to_string())?;
+    let app_candidate = app_ok_candidate(common);
+    let (scan, app_ok) = crate::cli::scan_with_optional_app(
+        common,
+        if app_candidate {
+            &files
+        } else {
+            &changed_files
+        },
+        if app_candidate { &dbs } else { &changed_dbs },
+    )?;
     sender
         .send(WorkerEvent::Progress {
             scanned: total,
             total: Some(total),
         })
         .map_err(|_| "interactive refresh was cancelled".to_string())?;
-    let batch = refresh_batch(&scan, &files, &dbs)?;
+    let mut batch = refresh_batch(&scan, &files, &dbs)?;
+    batch.app_metadata_refreshed = app_ok;
+    batch.app_metadata_diagnostic = scan
+        .diagnostics
+        .iter()
+        .find(|value| value.starts_with("App metadata unavailable:"))
+        .cloned();
     apply_refresh(&mut index, batch, reproject)?;
     let page = index
         .browse_ordered(&filter, None, page_size, order)
@@ -549,11 +567,49 @@ fn to_page(
                     profile_complete: c.profile_complete,
                     state: conversation_state_label(semantic.0).into(),
                     profile: profile_quality_label(semantic.1).into(),
+                    project: project_display(&c.project),
+                    tokens: token_display(
+                        &c.tokens.usage,
+                        c.tokens.covered_sessions,
+                        c.tokens.total_sessions,
+                    ),
+                    model: c.model,
                 }
             })
             .collect(),
         next_cursor: p.next_cursor.map(|c| c.encode()),
         approximate_total: usize::try_from(p.approximate_total).ok(),
+    }
+}
+
+fn project_display(
+    project: &ProfileFact<ProjectAssignment>,
+) -> codex_spawns::interactive::ProjectDisplay {
+    match project.value.as_ref() {
+        Some(ProjectAssignment::Assigned { id, name }) => {
+            codex_spawns::interactive::ProjectDisplay::Assigned {
+                id: id.clone(),
+                name: name.clone(),
+            }
+        }
+        Some(ProjectAssignment::Projectless) => {
+            codex_spawns::interactive::ProjectDisplay::NoProject
+        }
+        None => codex_spawns::interactive::ProjectDisplay::Unknown,
+    }
+}
+
+fn token_display(
+    tokens: &ProfileFact<codex_spawns::TokenUsage>,
+    covered: usize,
+    total: usize,
+) -> codex_spawns::interactive::TokenDisplay {
+    match tokens.value.as_ref() {
+        Some(usage) if total > 0 && covered < total => {
+            codex_spawns::interactive::TokenDisplay::LowerBound(usage.total_tokens)
+        }
+        Some(usage) => codex_spawns::interactive::TokenDisplay::Exact(usage.total_tokens),
+        None => codex_spawns::interactive::TokenDisplay::Unknown,
     }
 }
 
@@ -684,8 +740,9 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
             let stats = index.stats().map_err(|e| e.to_string())?;
             let projection = index.projection_status().map_err(|e| e.to_string())?;
             println!(
-                "index: {}\nstatus: ready\nconversations: {}\nagents: {}\nsources: {}\nmissing_sources: {}\nprojection_version: {}\nrequired_projection_version: {}\nneeds_reprojection: {}",
+                "index: {}\nstatus: ready\napp_metadata: {}\nconversations: {}\nagents: {}\nsources: {}\nmissing_sources: {}\nprojection_version: {}\nrequired_projection_version: {}\nneeds_reprojection: {}",
                 path.display(),
+                index.app_metadata_status().map_err(|e| e.to_string())?,
                 stats.conversations, stats.agents, stats.sources, stats.missing_sources,
                 projection.current, projection.required, projection.needs_reprojection()
             );
@@ -704,9 +761,24 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
             } else {
                 changed_sources(&index, &files, &dbs)?
             };
-            let scan = codex_spawns::scan_sources(&changed_files, &changed_dbs)
-                .map_err(|e| e.to_string())?;
-            let batch = refresh_batch(&scan, &files, &dbs)?;
+            let paths = crate::cli::app_metadata_paths(common);
+            let app_candidate = paths.thread_catalog.exists() && paths.global_state.exists();
+            let (scan, app_ok) = crate::cli::scan_with_optional_app(
+                common,
+                if app_candidate {
+                    &files
+                } else {
+                    &changed_files
+                },
+                if app_candidate { &dbs } else { &changed_dbs },
+            )?;
+            let mut batch = refresh_batch(&scan, &files, &dbs)?;
+            batch.app_metadata_refreshed = app_ok;
+            batch.app_metadata_diagnostic = scan
+                .diagnostics
+                .iter()
+                .find(|value| value.starts_with("App metadata unavailable:"))
+                .cloned();
             apply_refresh(&mut index, batch, reproject)?;
             let stats = index.stats().map_err(|e| e.to_string())?;
             println!(
@@ -725,6 +797,11 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
     }
     cleanup_ephemeral_index(common, &path);
     Ok(())
+}
+
+fn app_ok_candidate(common: &Common) -> bool {
+    let paths = crate::cli::app_metadata_paths(common);
+    paths.thread_catalog.exists() && paths.global_state.exists()
 }
 
 fn apply_refresh(
@@ -828,7 +905,9 @@ pub(crate) fn refresh_batch(
         roots.push(ConversationRecord {
             id: root.id.clone(),
             title: conversation_title(root, &cwd, &created),
-            title_source: if root.title.value.is_some() {
+            title_source: if scan.app_titles.contains_key(&root.id) {
+                "app"
+            } else if root.title.value.is_some() {
                 "official"
             } else if root.first_user_message.value.is_some() {
                 "user message"
@@ -850,7 +929,28 @@ pub(crate) fn refresh_batch(
             status: None,
             agent_count: related,
             max_depth,
-            profile_complete: root.parse_errors == 0,
+            profile_complete: root.parse_errors == 0
+                && scan.projects.get(&root.id).is_some_and(|fact| {
+                    fact.value.is_some() && fact.confidence != FactConfidence::Conflicting
+                })
+                && scan
+                    .conversation_tokens
+                    .get(&root.id)
+                    .is_some_and(|summary| {
+                        summary.usage.value.is_some()
+                            && summary.covered_sessions == summary.total_sessions
+                            && summary.usage.confidence != FactConfidence::Conflicting
+                    }),
+            project: scan
+                .projects
+                .get(&root.id)
+                .cloned()
+                .unwrap_or_else(ProfileFact::unknown),
+            tokens: scan
+                .conversation_tokens
+                .get(&root.id)
+                .cloned()
+                .unwrap_or_default(),
         });
         agents.push(AgentRecord {
             id: root.id.clone(),
@@ -859,6 +959,11 @@ pub(crate) fn refresh_batch(
             agent_path: None,
             task_name: Some("root conversation".into()),
             task_excerpt: None,
+            title: conversation_title(
+                root,
+                &root.cwd.value.clone().unwrap_or_default(),
+                &root.created_at.value.clone().unwrap_or_default(),
+            ),
             role: Some("root".into()),
             nickname: None,
             model: root.model.value.clone(),
@@ -866,6 +971,11 @@ pub(crate) fn refresh_batch(
             status: "complete".into(),
             depth: 0,
             evidence_complete: root.parse_errors == 0,
+            tokens: scan
+                .session_tokens
+                .get(&root.id)
+                .cloned()
+                .unwrap_or_else(ProfileFact::unknown),
         });
     }
     if unresolved {
@@ -882,6 +992,8 @@ pub(crate) fn refresh_batch(
             agent_count: 0,
             max_depth: 0,
             profile_complete: false,
+            project: ProfileFact::unknown(),
+            tokens: TokenUsageSummary::default(),
         });
     }
     let session_by_id: HashMap<_, _> = scan.agent_sessions.iter().map(|a| (&a.id, a)).collect();
@@ -905,12 +1017,19 @@ pub(crate) fn refresh_batch(
             .as_ref()
             .and_then(|id| session_by_id.get(id).copied());
         agents.push(AgentRecord {
-            id,
+            id: id.clone(),
             root_id,
             parent_id: attempt.parent_thread_id.clone(),
             agent_path: attempt.agent_path.value.clone(),
             task_name: attempt.task_name.value.clone(),
             task_excerpt: excerpt(attempt.message.value.as_deref()),
+            title: attempt
+                .message
+                .value
+                .as_deref()
+                .and_then(codex_spawns::project_plain_text)
+                .or_else(|| attempt.task_name.value.clone())
+                .unwrap_or_else(|| "unnamed agent".into()),
             role: attempt.agent_role.value.clone(),
             nickname: attempt.agent_nickname.value.clone(),
             model: attempt
@@ -930,6 +1049,11 @@ pub(crate) fn refresh_batch(
                 .or_else(|| session.and_then(|s| s.depth.value))
                 .unwrap_or(1),
             evidence_complete: attempt.output_error.value.is_none() && session.is_some(),
+            tokens: scan
+                .session_tokens
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(ProfileFact::unknown),
         });
     }
     let mut sources = Vec::new();
@@ -941,6 +1065,8 @@ pub(crate) fn refresh_batch(
         agents,
         sources,
         discovered_all_sources: true,
+        app_metadata_refreshed: false,
+        app_metadata_diagnostic: None,
         reject_reason: None,
     })
 }
@@ -1171,6 +1297,8 @@ mod tests {
             agent_count: 0,
             max_depth: 0,
             profile_complete: false,
+            project: ProfileFact::unknown(),
+            tokens: TokenUsageSummary::default(),
         };
         apply_refresh(
             &mut index,

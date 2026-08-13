@@ -1,4 +1,5 @@
 use super::*;
+use crate::{FactConfidence, ProfileFact, ProjectAssignment, TokenUsage, TokenUsageSummary};
 use tempfile::TempDir;
 
 fn open() -> (TempDir, ProfileIndex) {
@@ -24,6 +25,202 @@ fn conversation(id: &str, activity: &str) -> ConversationRecord {
         agent_count: 2,
         max_depth: 1,
         profile_complete: true,
+        project: ProfileFact::unknown(),
+        tokens: TokenUsageSummary::default(),
+    }
+}
+
+#[test]
+fn app_project_and_tokens_round_trip_through_the_public_profile_index() {
+    let (_dir, mut index) = open();
+    let mut record = conversation("root", "2026-01-01");
+    record.project = ProfileFact::observed(
+        ProjectAssignment::Assigned {
+            id: "p-1".into(),
+            name: "Atlas".into(),
+        },
+        crate::SourceRef::Derived {
+            rule: "fixture".into(),
+        },
+    );
+    record.tokens = TokenUsageSummary {
+        usage: ProfileFact {
+            value: Some(TokenUsage {
+                total_tokens: 12_400,
+                ..Default::default()
+            }),
+            confidence: FactConfidence::Observed,
+            provenance: vec![],
+            conflicting_values: vec![],
+        },
+        covered_sessions: 2,
+        total_sessions: 2,
+    };
+    let agent = AgentRecord {
+        id: "agent".into(),
+        root_id: "root".into(),
+        parent_id: Some("root".into()),
+        agent_path: None,
+        task_name: Some("worker".into()),
+        task_excerpt: None,
+        title: "Inspect metadata".into(),
+        role: None,
+        nickname: None,
+        model: None,
+        effort: None,
+        status: "complete".into(),
+        depth: 1,
+        evidence_complete: true,
+        tokens: ProfileFact::observed(
+            TokenUsage {
+                total_tokens: 400,
+                ..Default::default()
+            },
+            crate::SourceRef::Derived {
+                rule: "fixture".into(),
+            },
+        ),
+    };
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![record.clone()],
+                agents: vec![agent.clone()],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    let profile = index.profile("root").unwrap().unwrap();
+    assert_eq!(profile.conversation.project, record.project);
+    assert_eq!(profile.conversation.tokens, record.tokens);
+    assert_eq!(profile.agents, vec![agent]);
+}
+
+#[test]
+fn project_and_token_sort_filter_search_and_cursors_are_catalog_wide() {
+    let (_dir, mut index) = open();
+    let mut atlas = conversation("atlas", "1");
+    atlas.project = ProfileFact::observed(
+        ProjectAssignment::Assigned {
+            id: "p-atlas".into(),
+            name: "Atlas".into(),
+        },
+        crate::SourceRef::Derived {
+            rule: "fixture".into(),
+        },
+    );
+    atlas.tokens = token_summary(500, 1, 1);
+    let mut beta = conversation("beta", "2");
+    beta.project = ProfileFact::observed(
+        ProjectAssignment::Assigned {
+            id: "p-beta".into(),
+            name: "beta".into(),
+        },
+        crate::SourceRef::Derived {
+            rule: "fixture".into(),
+        },
+    );
+    beta.tokens = token_summary(100, 1, 2);
+    let mut none = conversation("none", "3");
+    none.project = ProfileFact::observed(
+        ProjectAssignment::Projectless,
+        crate::SourceRef::Derived {
+            rule: "fixture".into(),
+        },
+    );
+    let unknown = conversation("unknown", "4");
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![unknown, none, beta, atlas],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+    let project = BrowseOrder {
+        field: SortField::Project,
+        direction: SortDirection::Asc,
+    };
+    let first = index
+        .browse_ordered(&ConversationFilter::default(), None, 2, project)
+        .unwrap();
+    assert_eq!(ids(first.clone()), vec!["atlas", "beta"]);
+    assert_eq!(
+        ids(index
+            .browse_ordered(
+                &ConversationFilter::default(),
+                first.next_cursor.as_ref(),
+                2,
+                project
+            )
+            .unwrap()),
+        vec!["none", "unknown"]
+    );
+    assert_eq!(
+        ids(index
+            .browse_ordered(
+                &ConversationFilter::default(),
+                None,
+                25,
+                BrowseOrder {
+                    field: SortField::Tokens,
+                    direction: SortDirection::Desc
+                }
+            )
+            .unwrap()),
+        vec!["atlas", "beta", "none", "unknown"]
+    );
+
+    for (project_filter, expected) in [
+        (ProjectFilter::Assigned("p-beta".into()), vec!["beta"]),
+        (ProjectFilter::Projectless, vec!["none"]),
+        (ProjectFilter::Unknown, vec!["unknown"]),
+    ] {
+        assert_eq!(
+            ids(index
+                .browse(
+                    &ConversationFilter {
+                        project: Some(project_filter),
+                        ..Default::default()
+                    },
+                    None,
+                    25
+                )
+                .unwrap()),
+            expected
+        );
+    }
+    assert_eq!(
+        ids(index
+            .browse(
+                &ConversationFilter {
+                    query: Some("atlas".into()),
+                    ..Default::default()
+                },
+                None,
+                25
+            )
+            .unwrap()),
+        vec!["atlas"]
+    );
+}
+
+fn token_summary(total: u64, covered: usize, sessions: usize) -> TokenUsageSummary {
+    TokenUsageSummary {
+        usage: ProfileFact::observed(
+            TokenUsage {
+                total_tokens: total,
+                ..Default::default()
+            },
+            crate::SourceRef::Derived {
+                rule: "fixture".into(),
+            },
+        ),
+        covered_sessions: covered,
+        total_sessions: sessions,
     }
 }
 
@@ -408,6 +605,7 @@ fn search_matches_agent_metadata_outside_conversation_columns() {
         agent_path: Some("/root/scout".into()),
         task_name: Some("inspect-parser".into()),
         task_excerpt: Some("sensitive text is not searched".into()),
+        title: "Inspect parser".into(),
         role: Some("explorer".into()),
         nickname: Some("Scout".into()),
         model: Some("gpt-special".into()),
@@ -415,6 +613,7 @@ fn search_matches_agent_metadata_outside_conversation_columns() {
         status: "spawned".into(),
         depth: 1,
         evidence_complete: true,
+        tokens: ProfileFact::unknown(),
     };
     index
         .refresh(
@@ -477,6 +676,7 @@ fn agent_metadata_search_membership_is_stable_for_an_open_snapshot() {
         agent_path: Some(format!("/root/{id}")),
         task_name: Some(task_name.into()),
         task_excerpt: None,
+        title: task_name.into(),
         role: Some("explorer".into()),
         nickname: None,
         model: Some("gpt-test".into()),
@@ -484,6 +684,7 @@ fn agent_metadata_search_membership_is_stable_for_an_open_snapshot() {
         status: "complete".into(),
         depth: 1,
         evidence_complete: true,
+        tokens: ProfileFact::unknown(),
     };
     index
         .refresh(
@@ -672,6 +873,7 @@ fn profile_returns_the_complete_agent_tree_with_excerpts_only() {
         agent_path: Some("/root/research".into()),
         task_name: Some("research".into()),
         task_excerpt: Some("Inspect the parser".into()),
+        title: "Inspect the parser".into(),
         role: Some("explorer".into()),
         nickname: None,
         model: Some("gpt-5".into()),
@@ -679,6 +881,7 @@ fn profile_returns_the_complete_agent_tree_with_excerpts_only() {
         status: "spawned".into(),
         depth: 1,
         evidence_complete: true,
+        tokens: ProfileFact::unknown(),
     };
     index
         .refresh(
