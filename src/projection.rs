@@ -1,7 +1,11 @@
 use serde_json::Value;
 
 /// Required version of persisted profile projections.
-pub const PROJECTION_VERSION: u32 = 1;
+/// Schema version for every persisted projection derived from rollout content.
+///
+/// The index imports this constant directly so extraction and persistence cannot
+/// silently disagree about which projection is current.
+pub const PROJECTION_VERSION: u32 = 2;
 
 /// Title-specific alias for consumers that expose per-projection diagnostics.
 pub const TITLE_PROJECTION_VERSION: u32 = PROJECTION_VERSION;

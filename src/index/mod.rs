@@ -10,8 +10,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 1;
-pub const REQUIRED_PROJECTION_VERSION: u32 = 2;
+const SCHEMA_VERSION: i64 = 2;
+const SNAPSHOT_RETENTION_GENERATIONS: i64 = 64;
+pub use crate::projection::PROJECTION_VERSION as REQUIRED_PROJECTION_VERSION;
 
 #[derive(Debug, Error)]
 pub enum IndexError {
@@ -142,6 +143,9 @@ pub struct BrowseCursor {
     snapshot_at: String,
     order: BrowseOrder,
     id: String,
+    filter: String,
+    key: String,
+    null_rank: i64,
 }
 
 impl BrowseCursor {
@@ -158,6 +162,8 @@ pub struct BrowsePage {
     pub conversations: Vec<ConversationRecord>,
     pub next_cursor: Option<BrowseCursor>,
     pub semantics: BTreeMap<String, (ConversationState, ProfileQuality)>,
+    /// Total rows matching the current filter in this immutable snapshot.
+    pub approximate_total: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -230,6 +236,11 @@ impl ProfileIndex {
         )?;
         ensure_column(&conn, "profile_quality", "TEXT NOT NULL DEFAULT 'partial'")?;
         conn.execute(
+            "INSERT OR IGNORE INTO conversation_versions(id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,conversation_state,profile_quality,indexed_generation)
+             SELECT id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,conversation_state,profile_quality,indexed_generation FROM conversations",
+            [],
+        )?;
+        conn.execute(
             "INSERT OR IGNORE INTO index_metadata(key,value) VALUES('projection_version','0')",
             [],
         )?;
@@ -276,70 +287,137 @@ impl ProfileIndex {
         } else {
             page_size.min(250)
         };
+        let filter_signature = filter_signature(filter);
         let snapshot_at = cursor
             .map(|c| c.snapshot_at.clone())
             .unwrap_or_else(|| max_generation(&self.conn).unwrap_or_default().to_string());
         let generation = snapshot_at
             .parse::<i64>()
             .map_err(|_| IndexError::InvalidCursor)?;
-        if cursor.is_some_and(|cursor| cursor.order != order) {
+        if cursor.is_some() && !generation_is_retained(&self.conn, generation)? {
             return Err(IndexError::InvalidCursor);
         }
-        let mut stmt = self.conn.prepare(
-            "SELECT id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,conversation_state,profile_quality
-             FROM conversations WHERE indexed_generation <= ?1
-             AND (?2 IS NULL OR archived=?2) AND (?3 IS NULL OR cwd=?3) AND (?4 IS NULL OR model=?4) AND (?5 IS NULL OR status=?5)
-             AND (?6 IS NULL OR title LIKE '%'||?6||'%' OR id LIKE '%'||?6||'%' OR cwd LIKE '%'||?6||'%'
-               OR EXISTS (SELECT 1 FROM agents a WHERE a.root_id=conversations.id AND
-                 (a.id LIKE '%'||?6||'%' OR a.task_name LIKE '%'||?6||'%' OR a.role LIKE '%'||?6||'%'
-                  OR a.nickname LIKE '%'||?6||'%' OR a.model LIKE '%'||?6||'%' OR a.status LIKE '%'||?6||'%')))")?;
-        let archived = filter.archived.map(i64::from);
-        let rows = stmt.query_map(
-            params![
-                generation,
-                archived,
-                filter.cwd,
-                filter.model,
-                filter.status,
-                filter.query,
-            ],
-            |row| {
-                Ok((
-                    row_to_conversation(row)?,
-                    row.get::<_, String>(12)?,
-                    row.get::<_, String>(13)?,
-                ))
-            },
-        )?;
-        let mut indexed = rows.collect::<Result<Vec<_>, _>>()?;
-        indexed.sort_by(|left, right| compare_indexed(left, right, order));
-        let start = match cursor {
-            Some(cursor) => {
-                indexed
-                    .iter()
-                    .position(|(conversation, _, _)| conversation.id == cursor.id)
-                    .ok_or(IndexError::InvalidCursor)?
-                    + 1
-            }
-            None => 0,
+        if cursor.is_some_and(|cursor| cursor.order != order || cursor.filter != filter_signature) {
+            return Err(IndexError::InvalidCursor);
+        }
+        let (key_expr, null_expr, key_is_numeric) = sort_expressions(order.field);
+        let primary_op = if order.direction == SortDirection::Asc {
+            ">"
+        } else {
+            "<"
         };
-        let has_more = indexed.len() > start + limit;
-        indexed = indexed.into_iter().skip(start).take(limit).collect();
+        // Updated timestamps always place unknown values last and use ascending IDs
+        // as their deterministic tie-breaker. Other fields apply direction to IDs.
+        let id_op = if order.field == SortField::Updated || order.direction == SortDirection::Asc {
+            ">"
+        } else {
+            "<"
+        };
+        let id_direction = if id_op == ">" { "ASC" } else { "DESC" };
+        let primary_direction = if order.direction == SortDirection::Asc {
+            "ASC"
+        } else {
+            "DESC"
+        };
+        let cast = if key_is_numeric {
+            "CAST(?9 AS INTEGER)"
+        } else {
+            "?9"
+        };
+        let cursor_predicate = if cursor.is_some() {
+            format!("AND (({null_expr}) > ?8 OR (({null_expr}) = ?8 AND (({key_expr}) {primary_op} {cast} OR (({key_expr}) = {cast} AND id {id_op} ?10))))")
+        } else {
+            String::new()
+        };
+        let sql = format!("WITH snapshot AS (
+             SELECT cv.* FROM conversation_versions cv JOIN (
+               SELECT id,MAX(indexed_generation) AS generation FROM conversation_versions
+               WHERE indexed_generation <= ?1 GROUP BY id
+             ) latest ON latest.id=cv.id AND latest.generation=cv.indexed_generation
+           )
+           SELECT id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,conversation_state,profile_quality,
+                  CAST(({key_expr}) AS TEXT),({null_expr})
+           FROM snapshot WHERE (?2 IS NULL OR archived=?2) AND (?3 IS NULL OR cwd=?3) AND (?4 IS NULL OR model=?4) AND (?5 IS NULL OR status=?5)
+             AND (?6 IS NULL OR title LIKE '%'||?6||'%' OR id LIKE '%'||?6||'%' OR cwd LIKE '%'||?6||'%'
+               OR EXISTS (SELECT 1 FROM agents a WHERE a.root_id=snapshot.id AND
+                 (a.id LIKE '%'||?6||'%' OR a.task_name LIKE '%'||?6||'%' OR a.role LIKE '%'||?6||'%'
+                  OR a.nickname LIKE '%'||?6||'%' OR a.model LIKE '%'||?6||'%' OR a.status LIKE '%'||?6||'%')))
+             {cursor_predicate}
+           ORDER BY ({null_expr}) ASC, ({key_expr}) {primary_direction}, id {id_direction} LIMIT ?7");
+        let archived = filter.archived.map(i64::from);
+        let total = snapshot_total(&self.conn, generation, filter)?;
+        let mut stmt = self.conn.prepare(&sql)?;
+        let query_limit = (limit + 1) as i64;
+        let cursor_null = cursor.map_or(0, |value| value.null_rank);
+        let cursor_key = cursor.map_or("", |value| value.key.as_str());
+        let cursor_id = cursor.map_or("", |value| value.id.as_str());
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok((
+                row_to_conversation(row)?,
+                row.get::<_, String>(12)?,
+                row.get::<_, String>(13)?,
+                row.get::<_, String>(14)?,
+                row.get::<_, i64>(15)?,
+            ))
+        };
+        let mut indexed = if cursor.is_some() {
+            stmt.query_map(
+                params![
+                    generation,
+                    archived,
+                    filter.cwd,
+                    filter.model,
+                    filter.status,
+                    filter.query,
+                    query_limit,
+                    cursor_null,
+                    cursor_key,
+                    cursor_id
+                ],
+                map_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map(
+                params![
+                    generation,
+                    archived,
+                    filter.cwd,
+                    filter.model,
+                    filter.status,
+                    filter.query,
+                    query_limit
+                ],
+                map_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        let has_more = indexed.len() > limit;
+        indexed.truncate(limit);
         let semantics = indexed
             .iter()
-            .map(|(record, state, profile)| {
+            .map(|(record, state, profile, _, _)| {
                 (
                     record.id.clone(),
                     (parse_state(state), parse_profile(profile)),
                 )
             })
             .collect();
-        let conversations: Vec<_> = indexed.into_iter().map(|(record, _, _)| record).collect();
+        let next_key = indexed
+            .last()
+            .map(|(_, _, _, key, rank)| (key.clone(), *rank));
+        let conversations: Vec<_> = indexed
+            .into_iter()
+            .map(|(record, _, _, _, _)| record)
+            .collect();
         let next_cursor = if has_more {
             conversations.last().map(|c| BrowseCursor {
                 snapshot_at,
                 order,
                 id: c.id.clone(),
+                filter: filter_signature,
+                key: next_key.as_ref().unwrap().0.clone(),
+                null_rank: next_key.as_ref().unwrap().1,
             })
         } else {
             None
@@ -348,6 +426,7 @@ impl ProfileIndex {
             conversations,
             next_cursor,
             semantics,
+            approximate_total: total,
         })
     }
 
@@ -405,7 +484,17 @@ impl ProfileIndex {
         semantics: &[ConversationSemantics],
     ) -> Result<(), IndexError> {
         let tx = self.conn.transaction()?;
-        apply_semantics(&tx, semantics)?;
+        let generation: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(indexed_generation),0)+1 FROM conversation_versions",
+            [],
+            |row| row.get(0),
+        )?;
+        for record in semantics {
+            tx.execute("UPDATE conversations SET conversation_state=?2,profile_quality=?3,indexed_generation=?4 WHERE id=?1",
+                params![record.id, state_label(record.state), profile_label(record.profile), generation])?;
+            tx.execute("INSERT INTO conversation_versions(id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,conversation_state,profile_quality,indexed_generation)
+                SELECT id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,conversation_state,profile_quality,indexed_generation FROM conversations WHERE id=?1", [&record.id])?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -519,6 +608,7 @@ impl ProfileIndex {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM agents", [])?;
         tx.execute("DELETE FROM conversations", [])?;
+        tx.execute("DELETE FROM conversation_versions", [])?;
         tx.execute("DELETE FROM sources", [])?;
         tx.commit()?;
         Ok(())
@@ -538,7 +628,7 @@ fn apply_batch<F: FnMut(RefreshEvent)>(
     emit: &mut F,
 ) -> Result<(), IndexError> {
     let generation: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(indexed_generation),0)+1 FROM conversations",
+        "SELECT COALESCE(MAX(indexed_generation),0)+1 FROM conversation_versions",
         [],
         |r| r.get(0),
     )?;
@@ -558,7 +648,18 @@ fn apply_batch<F: FnMut(RefreshEvent)>(
                 }
             ],
         )?;
+        tx.execute("INSERT INTO conversation_versions(id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,conversation_state,profile_quality,indexed_generation)
+          SELECT id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,conversation_state,profile_quality,indexed_generation FROM conversations WHERE id=?1",
+          [&c.id])?;
     }
+    // Keep snapshots bounded while always retaining the latest version of every
+    // conversation. Cursors older than this explicit window expire cleanly.
+    tx.execute(
+        "DELETE FROM conversation_versions
+         WHERE indexed_generation < ?1
+           AND indexed_generation < (SELECT MAX(newer.indexed_generation) FROM conversation_versions newer WHERE newer.id=conversation_versions.id)",
+        [generation.saturating_sub(SNAPSHOT_RETENTION_GENERATIONS - 1)],
+    )?;
     for agent in &batch.agents {
         tx.execute(
             "INSERT INTO agents VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
@@ -595,16 +696,65 @@ fn apply_semantics(
                 profile_label(semantics.profile)
             ],
         )?;
+        tx.execute("UPDATE conversation_versions SET conversation_state=?2,profile_quality=?3 WHERE id=?1 AND indexed_generation=(SELECT indexed_generation FROM conversations WHERE id=?1)",
+            params![semantics.id, state_label(semantics.state), profile_label(semantics.profile)])?;
     }
     Ok(())
 }
 
 fn max_generation(conn: &Connection) -> Result<i64, rusqlite::Error> {
     conn.query_row(
-        "SELECT COALESCE(MAX(indexed_generation),0) FROM conversations",
+        "SELECT COALESCE(MAX(indexed_generation),0) FROM conversation_versions",
         [],
         |r| r.get(0),
     )
+}
+
+fn generation_is_retained(conn: &Connection, generation: i64) -> Result<bool, IndexError> {
+    let bounds = conn.query_row(
+        "SELECT COALESCE(MIN(indexed_generation),0),COALESCE(MAX(indexed_generation),0) FROM conversation_versions",
+        [],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    Ok(generation >= bounds.0 && generation <= bounds.1)
+}
+
+fn filter_signature(filter: &ConversationFilter) -> String {
+    serde_json::json!({
+        "archived": filter.archived,
+        "cwd": filter.cwd,
+        "model": filter.model,
+        "status": filter.status,
+        "query": filter.query,
+    })
+    .to_string()
+}
+
+fn sort_expressions(field: SortField) -> (&'static str, &'static str, bool) {
+    match field {
+        SortField::Updated => ("last_activity_at", "CASE WHEN last_activity_at='' THEN 1 ELSE 0 END", false),
+        SortField::Title => ("LOWER(title)", "CASE WHEN 1 THEN 0 END", false),
+        SortField::Agents => ("agent_count", "CASE WHEN 1 THEN 0 END", true),
+        SortField::Depth => ("max_depth", "CASE WHEN 1 THEN 0 END", true),
+        SortField::State => ("CASE conversation_state WHEN 'active' THEN 0 WHEN 'archived' THEN 1 ELSE 2 END", "CASE WHEN 1 THEN 0 END", true),
+        SortField::Profile => ("CASE profile_quality WHEN 'complete' THEN 0 WHEN 'partial' THEN 1 WHEN 'conflicting' THEN 2 WHEN 'updating' THEN 3 ELSE 4 END", "CASE WHEN 1 THEN 0 END", true),
+    }
+}
+
+fn snapshot_total(
+    conn: &Connection,
+    generation: i64,
+    filter: &ConversationFilter,
+) -> Result<u64, IndexError> {
+    let archived = filter.archived.map(i64::from);
+    Ok(conn.query_row("WITH snapshot AS (
+      SELECT cv.* FROM conversation_versions cv JOIN (
+        SELECT id,MAX(indexed_generation) AS generation FROM conversation_versions WHERE indexed_generation<=?1 GROUP BY id
+      ) latest ON latest.id=cv.id AND latest.generation=cv.indexed_generation
+    ) SELECT COUNT(*) FROM snapshot WHERE (?2 IS NULL OR archived=?2) AND (?3 IS NULL OR cwd=?3) AND (?4 IS NULL OR model=?4) AND (?5 IS NULL OR status=?5)
+      AND (?6 IS NULL OR title LIKE '%'||?6||'%' OR id LIKE '%'||?6||'%' OR cwd LIKE '%'||?6||'%'
+        OR EXISTS (SELECT 1 FROM agents a WHERE a.root_id=snapshot.id AND (a.id LIKE '%'||?6||'%' OR a.task_name LIKE '%'||?6||'%' OR a.role LIKE '%'||?6||'%' OR a.nickname LIKE '%'||?6||'%' OR a.model LIKE '%'||?6||'%' OR a.status LIKE '%'||?6||'%')))",
+      params![generation, archived, filter.cwd, filter.model, filter.status, filter.query], |row| row.get(0))?)
 }
 
 fn ensure_column(conn: &Connection, name: &str, declaration: &str) -> Result<(), IndexError> {
@@ -637,46 +787,6 @@ fn row_to_conversation(r: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationRe
         max_depth: r.get(10)?,
         profile_complete: r.get(11)?,
     })
-}
-
-fn compare_indexed(
-    left: &(ConversationRecord, String, String),
-    right: &(ConversationRecord, String, String),
-    order: BrowseOrder,
-) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    let (left_record, left_state, left_profile) = left;
-    let (right_record, right_state, right_profile) = right;
-    let primary = match order.field {
-        SortField::Updated => match (
-            left_record.last_activity_at.is_empty(),
-            right_record.last_activity_at.is_empty(),
-        ) {
-            (true, false) => Ordering::Greater,
-            (false, true) => Ordering::Less,
-            _ => left_record
-                .last_activity_at
-                .cmp(&right_record.last_activity_at),
-        },
-        SortField::Title => left_record
-            .title
-            .to_lowercase()
-            .cmp(&right_record.title.to_lowercase()),
-        SortField::Agents => left_record.agent_count.cmp(&right_record.agent_count),
-        SortField::Depth => left_record.max_depth.cmp(&right_record.max_depth),
-        SortField::State => parse_state(left_state).cmp(&parse_state(right_state)),
-        SortField::Profile => parse_profile(left_profile).cmp(&parse_profile(right_profile)),
-    };
-    let primary = if order.field == SortField::Updated
-        && (left_record.last_activity_at.is_empty() || right_record.last_activity_at.is_empty())
-    {
-        primary
-    } else if order.direction == SortDirection::Desc {
-        primary.reverse()
-    } else {
-        primary
-    };
-    primary.then_with(|| left_record.id.cmp(&right_record.id))
 }
 
 fn parse_state(value: &str) -> ConversationState {
@@ -734,6 +844,8 @@ fn set_file_permissions(_: &Path) -> std::io::Result<()> {
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,title TEXT NOT NULL,title_source TEXT NOT NULL,cwd TEXT NOT NULL,created_at TEXT NOT NULL,last_activity_at TEXT NOT NULL,archived INTEGER NOT NULL,model TEXT,status TEXT,agent_count INTEGER NOT NULL,max_depth INTEGER NOT NULL,profile_complete INTEGER NOT NULL,indexed_generation INTEGER NOT NULL,conversation_state TEXT NOT NULL DEFAULT 'active',profile_quality TEXT NOT NULL DEFAULT 'partial');
 CREATE INDEX IF NOT EXISTS conversation_browse ON conversations(last_activity_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS conversation_versions(id TEXT NOT NULL,title TEXT NOT NULL,title_source TEXT NOT NULL,cwd TEXT NOT NULL,created_at TEXT NOT NULL,last_activity_at TEXT NOT NULL,archived INTEGER NOT NULL,model TEXT,status TEXT,agent_count INTEGER NOT NULL,max_depth INTEGER NOT NULL,profile_complete INTEGER NOT NULL,conversation_state TEXT NOT NULL,profile_quality TEXT NOT NULL,indexed_generation INTEGER NOT NULL,PRIMARY KEY(id,indexed_generation));
+CREATE INDEX IF NOT EXISTS conversation_versions_snapshot ON conversation_versions(indexed_generation,id);
 CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY,root_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,parent_id TEXT,agent_path TEXT,task_name TEXT,task_excerpt TEXT,role TEXT,nickname TEXT,model TEXT,effort TEXT,status TEXT NOT NULL,depth INTEGER NOT NULL,evidence_complete INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS agents_by_root ON agents(root_id,depth,id);
 CREATE TABLE IF NOT EXISTS sources(logical_id TEXT PRIMARY KEY,canonical_path TEXT NOT NULL UNIQUE,size INTEGER NOT NULL,modified_ns INTEGER NOT NULL,fingerprint TEXT NOT NULL,safe_offset INTEGER NOT NULL,archived INTEGER NOT NULL,missing INTEGER NOT NULL DEFAULT 0,missing_since INTEGER);

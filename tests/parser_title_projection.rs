@@ -61,7 +61,7 @@ fn extracts_intent_from_structured_content_without_serializing_injected_plugins(
     let parsed = parse_rollout(fixture("plugins_then_intent.jsonl")).unwrap();
     let root = parsed.root.unwrap();
 
-    assert_eq!(TITLE_PROJECTION_VERSION, 1);
+    assert_eq!(TITLE_PROJECTION_VERSION, 2);
     assert_eq!(PROJECTION_VERSION, TITLE_PROJECTION_VERSION);
     assert_eq!(
         root.first_user_message.value.as_deref(),

@@ -302,6 +302,73 @@ fn refresh_and_cursor_pagination_keep_a_stable_browse_snapshot() {
 }
 
 #[test]
+fn refresh_updating_an_existing_row_does_not_mutate_an_open_snapshot() {
+    let (_dir, mut index) = open();
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![
+                    conversation("a", "1"),
+                    conversation("b", "2"),
+                    conversation("c", "3"),
+                ],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    let first = index
+        .browse(&ConversationFilter::default(), None, 1)
+        .unwrap();
+    assert_eq!(ids(first.clone()), vec!["c"]);
+
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![conversation("b", "9")],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    let second = index
+        .browse(
+            &ConversationFilter::default(),
+            first.next_cursor.as_ref(),
+            2,
+        )
+        .unwrap();
+    assert_eq!(ids(second), vec!["b", "a"]);
+}
+
+#[test]
+fn browse_reports_snapshot_total_and_rejects_cursor_reused_with_another_filter() {
+    let (_dir, mut index) = open();
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![conversation("a", "1"), conversation("b", "2")],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    let first = index
+        .browse(&ConversationFilter::default(), None, 1)
+        .unwrap();
+    assert_eq!(first.approximate_total, 2);
+    let error = index.browse(
+        &ConversationFilter {
+            query: Some("a".into()),
+            ..Default::default()
+        },
+        first.next_cursor.as_ref(),
+        1,
+    );
+    assert!(matches!(error, Err(IndexError::InvalidCursor)));
+}
+
+#[test]
 fn filters_metadata_without_indexing_messages() {
     let (_dir, mut index) = open();
     let mut archived = conversation("archived", "2026-01-02");
