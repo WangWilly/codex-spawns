@@ -1,5 +1,6 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
+use tempfile::TempDir;
 
 fn fixture(name: &str) -> String {
     format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
@@ -64,4 +65,46 @@ fn aliases_and_index_commands_are_exposed() {
         .success()
         .stdout(predicate::str::contains("interactive"))
         .stdout(predicate::str::contains("index"));
+}
+
+#[test]
+fn index_refresh_status_and_rebuild_use_discovered_rollouts() {
+    let home = TempDir::new().unwrap();
+    let common = [
+        "--codex-home",
+        home.path().to_str().unwrap(),
+        "--file",
+        &fixture("parent.jsonl"),
+        "--file",
+        &fixture("child.jsonl"),
+        "--no-state-db",
+    ];
+    Command::cargo_bin("codex-spawns")
+        .unwrap()
+        .args(["index", "refresh"])
+        .args(common)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "indexed: 1 conversations, 2 agents, 2 sources",
+        ));
+    Command::cargo_bin("codex-spawns")
+        .unwrap()
+        .args([
+            "index",
+            "status",
+            "--codex-home",
+            home.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("conversations: 1"))
+        .stdout(predicate::str::contains("agents: 2"));
+    Command::cargo_bin("codex-spawns")
+        .unwrap()
+        .args(["index", "rebuild"])
+        .args(common)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("indexed: 1 conversations"));
 }

@@ -98,6 +98,14 @@ pub struct BrowsePage {
     pub next_cursor: Option<BrowseCursor>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IndexStats {
+    pub conversations: u64,
+    pub agents: u64,
+    pub sources: u64,
+    pub missing_sources: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceRecord {
     pub logical_id: String,
@@ -300,6 +308,35 @@ impl ProfileIndex {
             conversation,
             agents,
         }))
+    }
+
+    pub fn stats(&self) -> Result<IndexStats, IndexError> {
+        Ok(IndexStats {
+            conversations: self
+                .conn
+                .query_row("SELECT count(*) FROM conversations", [], |r| r.get(0))?,
+            agents: self
+                .conn
+                .query_row("SELECT count(*) FROM agents", [], |r| r.get(0))?,
+            sources: self
+                .conn
+                .query_row("SELECT count(*) FROM sources", [], |r| r.get(0))?,
+            missing_sources: self.conn.query_row(
+                "SELECT count(*) FROM sources WHERE missing=1",
+                [],
+                |r| r.get(0),
+            )?,
+        })
+    }
+
+    /// Clear only the rebuildable catalog. Source rollouts and Codex state DBs are untouched.
+    pub fn reset(&mut self) -> Result<(), IndexError> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM agents", [])?;
+        tx.execute("DELETE FROM conversations", [])?;
+        tx.execute("DELETE FROM sources", [])?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn prune_missing(&mut self, missing_before: i64) -> Result<usize, IndexError> {

@@ -1,7 +1,11 @@
 use crate::cli::{Common, IndexAction};
 use codex_spawns::{
-    index::{ConversationFilter, IndexOptions, ProfileIndex},
+    index::{
+        AgentRecord, ConversationFilter, ConversationRecord, IndexOptions, ProfileIndex,
+        RefreshBatch, SourceRecord,
+    },
     interactive::{self, App, Command, Event, Page, Preferences},
+    ScanResult, SpawnStatus,
 };
 use crossterm::{
     event::{self, Event as TerminalEvent, KeyCode, KeyEventKind, KeyModifiers},
@@ -10,8 +14,11 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    io::Read,
     io::{self, IsTerminal},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -170,17 +177,28 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
         IndexAction::Status => {
             let index = ProfileIndex::open(IndexOptions { path: path.clone() })
                 .map_err(|e| e.to_string())?;
-            let page = index
-                .browse(&ConversationFilter::default(), None, 1)
-                .map_err(|e| e.to_string())?;
+            let stats = index.stats().map_err(|e| e.to_string())?;
             println!(
-                "index: {}\nstatus: ready\nhas_conversations: {}",
+                "index: {}\nstatus: ready\nconversations: {}\nagents: {}\nsources: {}\nmissing_sources: {}",
                 path.display(),
-                !page.conversations.is_empty()
+                stats.conversations, stats.agents, stats.sources, stats.missing_sources
             );
         }
         IndexAction::Refresh | IndexAction::Rebuild => {
-            return Err("index refresh requires the ingestion adapter (not yet available)".into())
+            let rebuild = matches!(action, IndexAction::Rebuild);
+            let (files, dbs) = crate::cli::discover(common)?;
+            let scan = codex_spawns::scan_sources(&files, &dbs).map_err(|e| e.to_string())?;
+            let batch = refresh_batch(&scan, &files, &dbs)?;
+            let mut index = ProfileIndex::open(IndexOptions { path }).map_err(|e| e.to_string())?;
+            if rebuild {
+                index.reset().map_err(|e| e.to_string())?;
+            }
+            index.refresh(batch, |_| {}).map_err(|e| e.to_string())?;
+            let stats = index.stats().map_err(|e| e.to_string())?;
+            println!(
+                "indexed: {} conversations, {} agents, {} sources",
+                stats.conversations, stats.agents, stats.sources
+            );
         }
         IndexAction::Prune { before } => {
             let mut index = ProfileIndex::open(IndexOptions { path }).map_err(|e| e.to_string())?;
@@ -191,4 +209,237 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn refresh_batch(
+    scan: &ScanResult,
+    files: &[PathBuf],
+    dbs: &[PathBuf],
+) -> Result<RefreshBatch, String> {
+    let mut roots = Vec::new();
+    let mut agents = Vec::new();
+    let mut root_for_agent = HashMap::<String, String>::new();
+    for root in &scan.root_conversations {
+        root_for_agent.insert(root.id.clone(), root.id.clone());
+    }
+    // Resolve child ancestry repeatedly because rollout discovery order is not guaranteed.
+    for _ in 0..=scan.agent_sessions.len() {
+        let mut changed = false;
+        for agent in &scan.agent_sessions {
+            if root_for_agent.contains_key(&agent.id) {
+                continue;
+            }
+            if let Some(parent) = agent.parent_thread_id.value.as_ref() {
+                if let Some(root) = root_for_agent.get(parent).cloned() {
+                    root_for_agent.insert(agent.id.clone(), root);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let unresolved = scan
+        .agent_sessions
+        .iter()
+        .any(|a| !root_for_agent.contains_key(&a.id))
+        || scan.spawn_attempts.iter().any(|a| {
+            a.parent_thread_id
+                .as_ref()
+                .is_none_or(|p| !root_for_agent.contains_key(p))
+        });
+    for root in &scan.root_conversations {
+        let created = root.created_at.value.clone().unwrap_or_default();
+        let cwd = root.cwd.value.clone().unwrap_or_default();
+        let related = scan
+            .spawn_attempts
+            .iter()
+            .filter(|a| {
+                a.parent_thread_id
+                    .as_ref()
+                    .and_then(|p| root_for_agent.get(p))
+                    == Some(&root.id)
+            })
+            .count() as u64;
+        let max_depth = scan
+            .agent_sessions
+            .iter()
+            .filter(|a| root_for_agent.get(&a.id) == Some(&root.id))
+            .filter_map(|a| a.depth.value)
+            .max()
+            .unwrap_or(0);
+        roots.push(ConversationRecord {
+            id: root.id.clone(),
+            title: fallback_title(&cwd, &created, &root.id),
+            title_source: "derived".into(),
+            cwd,
+            created_at: created.clone(),
+            last_activity_at: created,
+            archived: is_archived(&root.path),
+            model: root.model.value.clone(),
+            status: None,
+            agent_count: related,
+            max_depth,
+            profile_complete: root.parse_errors == 0,
+        });
+        agents.push(AgentRecord {
+            id: root.id.clone(),
+            root_id: root.id.clone(),
+            parent_id: None,
+            agent_path: None,
+            task_name: Some("root conversation".into()),
+            task_excerpt: None,
+            role: Some("root".into()),
+            nickname: None,
+            model: root.model.value.clone(),
+            effort: root.effort.value.clone(),
+            status: "complete".into(),
+            depth: 0,
+            evidence_complete: root.parse_errors == 0,
+        });
+    }
+    if unresolved {
+        roots.push(ConversationRecord {
+            id: "__unresolved__".into(),
+            title: "Unresolved Agents".into(),
+            title_source: "virtual".into(),
+            cwd: String::new(),
+            created_at: String::new(),
+            last_activity_at: String::new(),
+            archived: false,
+            model: None,
+            status: Some("orphan".into()),
+            agent_count: 0,
+            max_depth: 0,
+            profile_complete: false,
+        });
+    }
+    let session_by_id: HashMap<_, _> = scan.agent_sessions.iter().map(|a| (&a.id, a)).collect();
+    let mut added = HashSet::new();
+    for attempt in &scan.spawn_attempts {
+        let id = attempt
+            .child_thread_id
+            .clone()
+            .unwrap_or_else(|| attempt.id.clone());
+        if !added.insert(id.clone()) {
+            continue;
+        }
+        let root_id = attempt
+            .parent_thread_id
+            .as_ref()
+            .and_then(|p| root_for_agent.get(p))
+            .cloned()
+            .unwrap_or_else(|| "__unresolved__".into());
+        let session = attempt
+            .child_thread_id
+            .as_ref()
+            .and_then(|id| session_by_id.get(id).copied());
+        agents.push(AgentRecord {
+            id,
+            root_id,
+            parent_id: attempt.parent_thread_id.clone(),
+            agent_path: attempt.agent_path.value.clone(),
+            task_name: attempt.task_name.value.clone(),
+            task_excerpt: excerpt(attempt.message.value.as_deref()),
+            role: attempt.agent_role.value.clone(),
+            nickname: attempt.agent_nickname.value.clone(),
+            model: attempt
+                .effective_model
+                .value
+                .clone()
+                .or_else(|| attempt.requested_model.value.clone()),
+            effort: attempt
+                .effective_effort
+                .value
+                .clone()
+                .or_else(|| attempt.requested_effort.value.clone()),
+            status: spawn_status(&attempt.status).into(),
+            depth: attempt
+                .depth
+                .value
+                .or_else(|| session.and_then(|s| s.depth.value))
+                .unwrap_or(1),
+            evidence_complete: attempt.output_error.value.is_none() && session.is_some(),
+        });
+    }
+    let mut sources = Vec::new();
+    for path in files.iter().chain(dbs.iter()) {
+        sources.push(source_record(path, is_archived(path))?);
+    }
+    Ok(RefreshBatch {
+        conversations: roots,
+        agents,
+        sources,
+        discovered_all_sources: true,
+        reject_reason: None,
+    })
+}
+
+fn fallback_title(cwd: &str, created: &str, id: &str) -> String {
+    let name = Path::new(cwd)
+        .file_name()
+        .and_then(|v| v.to_str())
+        .filter(|v| !v.is_empty());
+    match (name, created.is_empty()) {
+        (Some(n), false) => format!("{n} · {created}"),
+        (Some(n), true) => n.into(),
+        _ => id.chars().take(12).collect(),
+    }
+}
+fn excerpt(value: Option<&str>) -> Option<String> {
+    value.map(|s| {
+        if s.chars().count() > 120 {
+            format!("{}…", s.chars().take(119).collect::<String>())
+        } else {
+            s.into()
+        }
+    })
+}
+fn spawn_status(s: &SpawnStatus) -> &'static str {
+    match s {
+        SpawnStatus::Requested => "requested",
+        SpawnStatus::Spawned => "spawned",
+        SpawnStatus::Failed => "failed",
+        SpawnStatus::StateOnly => "state-only",
+        SpawnStatus::Orphan => "orphan",
+    }
+}
+fn is_archived(path: &Path) -> bool {
+    path.components()
+        .any(|c| c.as_os_str() == "archived_sessions")
+}
+fn source_record(path: &Path, archived: bool) -> Result<SourceRecord, String> {
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let metadata =
+        fs::metadata(path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+    let mut file =
+        fs::File::open(path).map_err(|e| format!("cannot fingerprint {}: {e}", path.display()))?;
+    let mut prefix = vec![0; metadata.len().min(4096) as usize];
+    file.read_exact(&mut prefix)
+        .map_err(|e| format!("cannot fingerprint {}: {e}", path.display()))?;
+    let logical_id = format!(
+        "{}:{}",
+        if path.extension().is_some_and(|e| e == "jsonl") {
+            "rollout"
+        } else {
+            "state"
+        },
+        canonical_path.display()
+    );
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos().min(i64::MAX as u128) as i64)
+        .unwrap_or(0);
+    Ok(SourceRecord {
+        logical_id,
+        canonical_path,
+        size: metadata.len(),
+        modified_ns,
+        fingerprint: blake3::hash(&prefix).to_hex().to_string(),
+        safe_offset: metadata.len(),
+        archived,
+    })
 }
