@@ -258,6 +258,45 @@ fn failed_app_refresh_retains_the_last_valid_title_project_and_fallback_tokens()
 }
 
 #[test]
+fn conflicting_token_evidence_marks_the_profile_without_hiding_effective_usage() {
+    let (_dir, mut index) = open();
+    let mut record = conversation("root", "1");
+    record.tokens = token_summary(900, 1, 1);
+    record.tokens.usage.confidence = FactConfidence::Conflicting;
+    record.tokens.usage.conflicting_values.push(TokenUsage {
+        total_tokens: 800,
+        ..Default::default()
+    });
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![record],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    let page = index
+        .browse(&ConversationFilter::default(), None, 25)
+        .unwrap();
+    assert_eq!(page.semantics["root"].1, ProfileQuality::Conflicting);
+    assert_eq!(
+        page.conversations[0]
+            .tokens
+            .usage
+            .value
+            .as_ref()
+            .unwrap()
+            .total_tokens,
+        900
+    );
+    assert_eq!(
+        page.conversations[0].tokens.usage.conflicting_values[0].total_tokens,
+        800
+    );
+}
+
+#[test]
 fn opening_a_v2_catalog_migrates_profile_fields_without_losing_rows() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy.sqlite");

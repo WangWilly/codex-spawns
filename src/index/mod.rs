@@ -52,6 +52,20 @@ pub struct ConversationRecord {
     pub tokens: TokenUsageSummary,
 }
 
+impl ConversationRecord {
+    pub fn profile_quality(&self) -> ProfileQuality {
+        if self.project.confidence == crate::FactConfidence::Conflicting
+            || self.tokens.usage.confidence == crate::FactConfidence::Conflicting
+        {
+            ProfileQuality::Conflicting
+        } else if self.profile_complete {
+            ProfileQuality::Complete
+        } else {
+            ProfileQuality::Partial
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentRecord {
     pub id: String,
@@ -391,7 +405,7 @@ impl ProfileIndex {
                WHERE indexed_generation <= ?1 GROUP BY id
              ) latest ON latest.id=cv.id AND latest.generation=cv.indexed_generation
            )
-           SELECT id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,conversation_state,profile_quality,project_json,tokens_json,
+           SELECT id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,project_json,tokens_json,conversation_state,profile_quality,
                   CAST(({key_expr}) AS TEXT),({null_expr})
            FROM snapshot WHERE (?2 IS NULL OR archived=?2) AND (?3 IS NULL OR cwd=?3) AND (?4 IS NULL OR model=?4) AND (?5 IS NULL OR status=?5)
              AND (?6 IS NULL OR title LIKE '%'||?6||'%' OR id LIKE '%'||?6||'%' OR cwd LIKE '%'||?6||'%' OR project_name LIKE '%'||?6||'%'
@@ -415,8 +429,8 @@ impl ProfileIndex {
         let map_row = |row: &rusqlite::Row<'_>| {
             Ok((
                 row_to_conversation(row)?,
-                row.get::<_, String>(12)?,
-                row.get::<_, String>(13)?,
+                row.get::<_, String>(14)?,
+                row.get::<_, String>(15)?,
                 row.get::<_, String>(16)?,
                 row.get::<_, i64>(17)?,
             ))
@@ -738,11 +752,7 @@ fn apply_batch<F: FnMut(RefreshEvent)>(
             params![
                 c.id,
                 if c.archived { "archived" } else { "active" },
-                if c.profile_complete {
-                    "complete"
-                } else {
-                    "partial"
-                }
+                profile_label(c.profile_quality())
             ],
         )?;
         tx.execute("INSERT INTO conversation_versions(id,title,title_source,cwd,created_at,last_activity_at,archived,model,status,agent_count,max_depth,profile_complete,conversation_state,profile_quality,indexed_generation,project_json,project_kind,project_id,project_name,tokens_json,token_total)

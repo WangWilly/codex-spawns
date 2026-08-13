@@ -335,6 +335,25 @@ fn summary_detail(agent: AgentRecord) -> codex_spawns::interactive::AgentDetail 
     if let Some(excerpt) = agent.task_excerpt {
         lines.push(("message excerpt".into(), excerpt));
     }
+    lines.push((
+        "tokens confidence".into(),
+        format!("{:?}", agent.tokens.confidence).to_lowercase(),
+    ));
+    if let Some(usage) = agent.tokens.value {
+        for (label, value) in [
+            ("input tokens", usage.input_tokens),
+            ("cached input tokens", usage.cached_input_tokens),
+            ("output tokens", usage.output_tokens),
+            ("reasoning output tokens", usage.reasoning_output_tokens),
+            ("model context window", usage.model_context_window),
+        ] {
+            lines.push((
+                label.into(),
+                value.map_or_else(|| "unknown".into(), |value| value.to_string()),
+            ));
+        }
+        lines.push(("total tokens".into(), usage.total_tokens.to_string()));
+    }
     codex_spawns::interactive::AgentDetail {
         agent_id: agent.id,
         lines,
@@ -835,11 +854,7 @@ fn projection_semantics(batch: &RefreshBatch) -> Vec<codex_spawns::index::Conver
             } else {
                 ConversationState::Active
             },
-            profile: if conversation.profile_complete {
-                ProfileQuality::Complete
-            } else {
-                ProfileQuality::Partial
-            },
+            profile: conversation.profile_quality(),
         })
         .collect()
 }
