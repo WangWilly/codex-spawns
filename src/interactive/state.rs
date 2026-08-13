@@ -85,9 +85,26 @@ pub enum Focus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sort {
-    Recent,
-    Oldest,
+    Updated,
     Title,
+    Agents,
+    Depth,
+    State,
+    Profile,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Viewport {
+    pub row: usize,
+    pub column: usize,
+    pub height: usize,
+    pub width: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,7 +122,7 @@ impl Default for Preferences {
         Self {
             page_size: 25,
             filter: Filter::All,
-            sort: Sort::Recent,
+            sort: Sort::Updated,
             pane_width_percent: 38,
             color: std::env::var_os("NO_COLOR").is_none(),
             sensitive_content_acknowledged: false,
@@ -133,6 +150,14 @@ pub enum Event {
     Key(char),
     Up,
     Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    ScrollLeft,
+    ScrollRight,
+    ScrollLeftPage,
+    ScrollRightPage,
     Enter,
     Back,
     Tab,
@@ -155,19 +180,53 @@ pub enum Event {
     RefreshProgress(RefreshProgress),
     RefreshReady(Page<ConversationItem>),
     ApplySnapshot,
+    SetViewport {
+        width: usize,
+        height: usize,
+    },
+    SelectSort(Sort),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Quit,
-    LoadMore { cursor: String },
-    LoadAgents { conversation_id: String },
-    LoadAgentDetail { agent_id: String },
+    LoadMore {
+        cursor: String,
+    },
+    LoadAgents {
+        conversation_id: String,
+    },
+    LoadAgentDetail {
+        agent_id: String,
+    },
     Refresh,
     Rebuild,
-    OpenEvidence { agent_id: String },
-    OpenMessage { agent_id: String },
-    Search { query: String, filter: Filter },
+    OpenEvidence {
+        agent_id: String,
+    },
+    OpenMessage {
+        agent_id: String,
+    },
+    Search {
+        query: String,
+        filter: Filter,
+    },
+    Sort {
+        field: Sort,
+        direction: SortDirection,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct NavigationState {
+    screen: Screen,
+    focus: Focus,
+    conversation_selection: usize,
+    agent_selection: usize,
+    conversation_viewport: Viewport,
+    tree_viewport: Viewport,
+    detail_viewport: Viewport,
+    help_viewport: Viewport,
 }
 
 #[derive(Debug)]
@@ -183,7 +242,7 @@ pub struct App {
     agent_selection: usize,
     details: Vec<AgentDetail>,
     screen: Screen,
-    previous_screen: Screen,
+    navigation: Vec<NavigationState>,
     focus: Focus,
     width: u16,
     search_editing: bool,
@@ -191,6 +250,13 @@ pub struct App {
     refresh_progress: Option<RefreshProgress>,
     pending_snapshot: Option<Page<ConversationItem>>,
     rebuild_confirmation: bool,
+    conversation_viewport: Viewport,
+    tree_viewport: Viewport,
+    detail_viewport: Viewport,
+    help_viewport: Viewport,
+    detail_wrap: bool,
+    sort_direction: SortDirection,
+    sort_overlay: bool,
 }
 
 impl App {
@@ -207,7 +273,7 @@ impl App {
             agent_selection: 0,
             details: vec![],
             screen: Screen::Conversations,
-            previous_screen: Screen::Conversations,
+            navigation: vec![],
             focus: Focus::Tree,
             width: 100,
             search_editing: false,
@@ -215,6 +281,13 @@ impl App {
             refresh_progress: None,
             pending_snapshot: None,
             rebuild_confirmation: false,
+            conversation_viewport: Viewport::default(),
+            tree_viewport: Viewport::default(),
+            detail_viewport: Viewport::default(),
+            help_viewport: Viewport::default(),
+            detail_wrap: true,
+            sort_direction: SortDirection::Descending,
+            sort_overlay: false,
         }
     }
 
@@ -243,7 +316,11 @@ impl App {
                 self.details.push(detail);
                 self.screen = Screen::AgentDetail;
             }
-            Event::Resize { width, .. } => self.width = width,
+            Event::Resize { width, height } => {
+                self.width = width;
+                self.set_active_viewport(width as usize, height.saturating_sub(7) as usize);
+            }
+            Event::SetViewport { width, height } => self.set_active_viewport(width, height),
             Event::RefreshProgress(progress) => self.refresh_progress = Some(progress),
             Event::RefreshReady(page) => {
                 self.pending_snapshot = Some(page);
@@ -273,11 +350,22 @@ impl App {
             Event::Up => {
                 self.move_up();
             }
+            Event::PageUp => {
+                self.move_page(false);
+            }
+            Event::PageDown => return self.move_page(true),
+            Event::Home => self.move_home(),
+            Event::End => self.move_end(),
+            Event::ScrollLeft => self.scroll_horizontal(false, false),
+            Event::ScrollRight => self.scroll_horizontal(true, false),
+            Event::ScrollLeftPage => self.scroll_horizontal(false, true),
+            Event::ScrollRightPage => self.scroll_horizontal(true, true),
             Event::Tab if !self.is_narrow() => self.focus = Focus::Detail,
             Event::BackTab if !self.is_narrow() => self.focus = Focus::Tree,
             Event::Enter => return self.enter(),
             Event::Back => self.back(),
             Event::Key(key) => return self.key(key),
+            Event::SelectSort(field) => return self.apply_sort(field),
             Event::Tab | Event::BackTab => {}
         }
         vec![]
@@ -327,8 +415,36 @@ impl App {
                 vec![]
             }
             '?' => {
-                self.previous_screen = self.screen;
+                self.push_navigation();
                 self.screen = Screen::Help;
+                vec![]
+            }
+            'h' => {
+                self.back();
+                vec![]
+            }
+            's' if self.screen == Screen::Conversations => {
+                self.sort_overlay = !self.sort_overlay;
+                vec![]
+            }
+            'w' if matches!(self.screen, Screen::Conversation | Screen::AgentDetail) => {
+                self.detail_wrap = !self.detail_wrap;
+                vec![]
+            }
+            'g' => {
+                self.move_home();
+                vec![]
+            }
+            'G' => {
+                self.move_end();
+                vec![]
+            }
+            'H' => {
+                self.scroll_horizontal(false, false);
+                vec![]
+            }
+            'L' => {
+                self.scroll_horizontal(true, false);
                 vec![]
             }
             'e' => self
@@ -366,6 +482,7 @@ impl App {
         match self.screen {
             Screen::Conversations => {
                 if let Some(item) = self.selected_conversation().cloned() {
+                    self.push_navigation();
                     self.selected_root_id = Some(item.id.clone());
                     self.agents.clear();
                     self.screen = Screen::Conversation;
@@ -378,6 +495,7 @@ impl App {
             }
             Screen::Conversation => {
                 if let Some(agent) = self.selected_agent().cloned() {
+                    self.push_navigation();
                     self.screen = Screen::AgentDetail;
                     if agent.detail_loaded {
                         vec![]
@@ -397,15 +515,22 @@ impl App {
             self.search_editing = false;
             return;
         }
-        match self.screen {
-            Screen::AgentDetail => self.screen = Screen::Conversation,
-            Screen::Conversation => {
-                self.screen = Screen::Conversations;
+        if self.sort_overlay {
+            self.sort_overlay = false;
+            return;
+        }
+        if let Some(state) = self.navigation.pop() {
+            self.screen = state.screen;
+            self.focus = state.focus;
+            self.conversation_selection = state.conversation_selection;
+            self.agent_selection = state.agent_selection;
+            self.conversation_viewport = state.conversation_viewport;
+            self.tree_viewport = state.tree_viewport;
+            self.detail_viewport = state.detail_viewport;
+            self.help_viewport = state.help_viewport;
+            if self.screen == Screen::Conversations {
                 self.selected_root_id = None;
-                self.agents.clear();
             }
-            Screen::Help => self.screen = self.previous_screen,
-            Screen::Conversations => {}
         }
     }
 
@@ -415,6 +540,10 @@ impl App {
                 let len = self.visible_conversations().len();
                 if self.conversation_selection + 1 < len {
                     self.conversation_selection += 1;
+                    Self::follow_selection(
+                        self.conversation_selection,
+                        &mut self.conversation_viewport,
+                    );
                     vec![]
                 } else if !self.loading_more {
                     let Some(cursor) = self.next_cursor.clone() else {
@@ -429,6 +558,7 @@ impl App {
             Screen::Conversation | Screen::AgentDetail => {
                 if self.agent_selection + 1 < self.agents.len() {
                     self.agent_selection += 1;
+                    Self::follow_selection(self.agent_selection, &mut self.tree_viewport);
                 }
                 vec![]
             }
@@ -446,6 +576,161 @@ impl App {
             }
             Screen::Help => {}
         }
+        match self.screen {
+            Screen::Conversations => {
+                Self::follow_selection(self.conversation_selection, &mut self.conversation_viewport)
+            }
+            Screen::Conversation | Screen::AgentDetail => {
+                Self::follow_selection(self.agent_selection, &mut self.tree_viewport)
+            }
+            Screen::Help => {}
+        }
+    }
+    fn push_navigation(&mut self) {
+        self.navigation.push(NavigationState {
+            screen: self.screen,
+            focus: self.focus,
+            conversation_selection: self.conversation_selection,
+            agent_selection: self.agent_selection,
+            conversation_viewport: self.conversation_viewport,
+            tree_viewport: self.tree_viewport,
+            detail_viewport: self.detail_viewport,
+            help_viewport: self.help_viewport,
+        });
+    }
+    fn active_viewport_mut(&mut self) -> &mut Viewport {
+        match self.screen {
+            Screen::Conversations => &mut self.conversation_viewport,
+            Screen::Conversation => match self.focus {
+                Focus::Tree => &mut self.tree_viewport,
+                Focus::Detail => &mut self.detail_viewport,
+            },
+            Screen::AgentDetail => &mut self.detail_viewport,
+            Screen::Help => &mut self.help_viewport,
+        }
+    }
+    fn set_active_viewport(&mut self, width: usize, height: usize) {
+        let viewport = self.active_viewport_mut();
+        viewport.width = width;
+        viewport.height = height.max(1);
+        match self.screen {
+            Screen::Conversations => {
+                Self::follow_selection(self.conversation_selection, &mut self.conversation_viewport)
+            }
+            Screen::Conversation => {
+                Self::follow_selection(self.agent_selection, &mut self.tree_viewport)
+            }
+            _ => {}
+        }
+    }
+    fn follow_selection(selection: usize, viewport: &mut Viewport) {
+        if selection < viewport.row {
+            viewport.row = selection;
+        }
+        let height = viewport.height.max(1);
+        if selection >= viewport.row + height {
+            viewport.row = selection + 1 - height;
+        }
+    }
+    fn move_page(&mut self, down: bool) -> Vec<Command> {
+        let amount = self.active_viewport_mut().height.max(1);
+        match self.screen {
+            Screen::Conversations => {
+                let len = self.visible_conversations().len();
+                self.conversation_selection = if down {
+                    (self.conversation_selection + amount).min(len.saturating_sub(1))
+                } else {
+                    self.conversation_selection.saturating_sub(amount)
+                };
+                Self::follow_selection(
+                    self.conversation_selection,
+                    &mut self.conversation_viewport,
+                );
+                if down
+                    && self.conversation_selection + 1 == len
+                    && self.next_cursor.is_some()
+                    && !self.loading_more
+                {
+                    return self.move_down();
+                }
+            }
+            Screen::Conversation | Screen::AgentDetail if self.focus == Focus::Tree => {
+                self.agent_selection = if down {
+                    (self.agent_selection + amount).min(self.agents.len().saturating_sub(1))
+                } else {
+                    self.agent_selection.saturating_sub(amount)
+                };
+                Self::follow_selection(self.agent_selection, &mut self.tree_viewport);
+            }
+            _ => {
+                let viewport = self.active_viewport_mut();
+                viewport.row = if down {
+                    viewport.row.saturating_add(amount)
+                } else {
+                    viewport.row.saturating_sub(amount)
+                };
+            }
+        }
+        vec![]
+    }
+    fn move_home(&mut self) {
+        match self.screen {
+            Screen::Conversations => {
+                self.conversation_selection = 0;
+                self.conversation_viewport.row = 0;
+            }
+            Screen::Conversation | Screen::AgentDetail if self.focus == Focus::Tree => {
+                self.agent_selection = 0;
+                self.tree_viewport.row = 0;
+            }
+            _ => self.active_viewport_mut().row = 0,
+        }
+    }
+    fn move_end(&mut self) {
+        match self.screen {
+            Screen::Conversations => {
+                self.conversation_selection = self.visible_conversations().len().saturating_sub(1);
+                Self::follow_selection(
+                    self.conversation_selection,
+                    &mut self.conversation_viewport,
+                );
+            }
+            Screen::Conversation | Screen::AgentDetail if self.focus == Focus::Tree => {
+                self.agent_selection = self.agents.len().saturating_sub(1);
+                Self::follow_selection(self.agent_selection, &mut self.tree_viewport);
+            }
+            _ => {}
+        }
+    }
+    fn scroll_horizontal(&mut self, right: bool, page: bool) {
+        let viewport = self.active_viewport_mut();
+        let amount = if page { viewport.width.max(1) } else { 4 };
+        viewport.column = if right {
+            viewport.column.saturating_add(amount)
+        } else {
+            viewport.column.saturating_sub(amount)
+        };
+    }
+    fn apply_sort(&mut self, field: Sort) -> Vec<Command> {
+        self.sort_overlay = false;
+        if self.preferences.sort == field {
+            self.sort_direction = match self.sort_direction {
+                SortDirection::Ascending => SortDirection::Descending,
+                SortDirection::Descending => SortDirection::Ascending,
+            };
+        } else {
+            self.preferences.sort = field;
+            self.sort_direction = match field {
+                Sort::Updated => SortDirection::Descending,
+                _ => SortDirection::Ascending,
+            };
+        }
+        self.conversation_selection = 0;
+        self.conversation_viewport.row = 0;
+        vec![Command::Sort {
+            field,
+            direction: self.sort_direction,
+        }]
     }
     fn replace_page(&mut self, page: Page<ConversationItem>) {
         self.conversations = page.items;
@@ -504,6 +789,7 @@ impl App {
     }
     pub fn select_last(&mut self) {
         self.conversation_selection = self.visible_conversations().len().saturating_sub(1);
+        Self::follow_selection(self.conversation_selection, &mut self.conversation_viewport);
     }
     pub fn screen(&self) -> Screen {
         self.screen
@@ -516,6 +802,27 @@ impl App {
     }
     pub fn preferences(&self) -> &Preferences {
         &self.preferences
+    }
+    pub fn conversation_viewport(&self) -> Viewport {
+        self.conversation_viewport
+    }
+    pub fn tree_viewport(&self) -> Viewport {
+        self.tree_viewport
+    }
+    pub fn detail_viewport(&self) -> Viewport {
+        self.detail_viewport
+    }
+    pub fn help_viewport(&self) -> Viewport {
+        self.help_viewport
+    }
+    pub fn detail_wrap(&self) -> bool {
+        self.detail_wrap
+    }
+    pub fn sort_direction(&self) -> SortDirection {
+        self.sort_direction
+    }
+    pub fn sort_overlay(&self) -> bool {
+        self.sort_overlay
     }
     pub fn is_narrow(&self) -> bool {
         self.width < 90

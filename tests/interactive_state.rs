@@ -1,6 +1,6 @@
 use codex_spawns::interactive::{
     AgentDetail, AgentItem, AgentStatus, App, Command, ConversationItem, Event, Filter, Focus,
-    Page, Preferences, RefreshProgress, Screen,
+    Page, Preferences, RefreshProgress, Screen, Sort, SortDirection,
 };
 
 fn conversation(id: &str, title: &str) -> ConversationItem {
@@ -14,6 +14,83 @@ fn conversation(id: &str, title: &str) -> ConversationItem {
         max_depth: 2,
         profile_complete: true,
     }
+}
+
+#[test]
+fn selection_follows_vertical_viewport_and_supports_page_home_end() {
+    let mut app = App::new(Preferences::default());
+    app.update(Event::ConversationsLoaded(Page {
+        items: (0..12)
+            .map(|n| conversation(&n.to_string(), &format!("Conversation {n}")))
+            .collect(),
+        next_cursor: None,
+        approximate_total: Some(12),
+    }));
+    app.update(Event::SetViewport {
+        width: 80,
+        height: 4,
+    });
+    for _ in 0..5 {
+        app.update(Event::Down);
+    }
+    assert_eq!(app.selected_conversation_index(), 5);
+    assert_eq!(app.conversation_viewport().row, 2);
+    app.update(Event::PageDown);
+    assert_eq!(app.selected_conversation_index(), 9);
+    assert_eq!(app.conversation_viewport().row, 6);
+    app.update(Event::Home);
+    assert_eq!(
+        (
+            app.selected_conversation_index(),
+            app.conversation_viewport().row
+        ),
+        (0, 0)
+    );
+    app.update(Event::End);
+    assert_eq!(
+        (
+            app.selected_conversation_index(),
+            app.conversation_viewport().row
+        ),
+        (11, 8)
+    );
+}
+
+#[test]
+fn horizontal_scroll_sort_and_navigation_stack_preserve_browse_state() {
+    let mut app = App::new(Preferences::default());
+    app.update(Event::ConversationsLoaded(Page {
+        items: vec![conversation("one", "One"), conversation("two", "Two")],
+        next_cursor: None,
+        approximate_total: Some(2),
+    }));
+    app.update(Event::SetViewport {
+        width: 20,
+        height: 1,
+    });
+    app.update(Event::Down);
+    app.update(Event::ScrollRight);
+    assert_eq!(app.conversation_viewport().column, 4);
+    assert_eq!(
+        app.update(Event::SelectSort(Sort::Title)),
+        vec![Command::Sort {
+            field: Sort::Title,
+            direction: SortDirection::Ascending
+        }]
+    );
+    assert_eq!(
+        app.update(Event::SelectSort(Sort::Title)),
+        vec![Command::Sort {
+            field: Sort::Title,
+            direction: SortDirection::Descending
+        }]
+    );
+    app.update(Event::Down);
+    app.update(Event::Enter);
+    app.update(Event::Back);
+    assert_eq!(app.screen(), Screen::Conversations);
+    assert_eq!(app.selected_conversation_index(), 1);
+    assert_eq!(app.conversation_viewport().column, 4);
 }
 
 #[test]
