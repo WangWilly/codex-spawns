@@ -5,6 +5,10 @@ edition = "2021"
 description = "Inspect Codex root conversations and spawned agent sessions"
 license = "MIT"
 
+[workspace]
+members = ["xtask"]
+resolver = "2"
+
 [lib]
 name = "codex_spawns"
 
