@@ -50,6 +50,26 @@ impl<T> ProfileFact<T> {
     }
 }
 
+impl<T: PartialEq + Clone> ProfileFact<T> {
+    /// Merge an additional observed value without hiding disagreements.
+    pub fn observe(&mut self, value: T, source: SourceRef) {
+        self.provenance.push(source);
+        match self.value.as_ref() {
+            None => {
+                self.value = Some(value);
+                self.confidence = FactConfidence::Observed;
+            }
+            Some(current) if current == &value => {}
+            Some(_) => {
+                if !self.conflicting_values.contains(&value) {
+                    self.conflicting_values.push(value);
+                }
+                self.confidence = FactConfidence::Conflicting;
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SpawnStatus {

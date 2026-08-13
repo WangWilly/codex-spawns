@@ -443,11 +443,7 @@ fn attempt_from_agent(a: &AgentSession) -> SpawnAttempt {
         id: blake3::hash(format!("child:{}", a.id).as_bytes())
             .to_hex()
             .to_string(),
-        status: if a.parent_thread_id.value.is_some() {
-            SpawnStatus::Orphan
-        } else {
-            SpawnStatus::Orphan
-        },
+        status: SpawnStatus::Orphan,
         created_at: ProfileFact::unknown(),
         parent_thread_id: a.parent_thread_id.value.clone(),
         child_thread_id: Some(a.id.clone()),
