@@ -70,7 +70,10 @@ pub fn parse_rollout(path: impl AsRef<Path>) -> Result<ParsedRollout, ParseError
         path: path.into(),
         source,
     })?;
-    let mut meta = Meta::default();
+    let mut meta = Meta {
+        id: rollout_id_from_path(path),
+        ..Meta::default()
+    };
     let mut calls = Vec::<ParsedSpawnCall>::new();
     let mut pending = HashMap::new();
     for (offset, raw) in BufReader::new(file).lines().enumerate() {
@@ -318,7 +321,19 @@ fn merge_child(attempt: &mut SpawnAttempt, child: &AgentSession) {
 }
 
 fn update_session(m: &mut Meta, p: &Map<String, Value>, line: u64) {
-    m.id = text(p.get("id").or_else(|| p.get("session_id"))).or(m.id.take());
+    // A rollout can contain inherited session metadata from an earlier
+    // conversation. Identity is immutable once established by the rollout
+    // filename or the first session metadata carrying an ID.
+    let incoming_id = text(p.get("id").or_else(|| p.get("session_id")));
+    if m.id.is_none() {
+        m.id = incoming_id;
+    } else if incoming_id
+        .as_ref()
+        .zip(m.id.as_ref())
+        .is_some_and(|(incoming, established)| incoming != established)
+    {
+        return;
+    }
     if let Some(v) = text(p.get("timestamp").or_else(|| p.get("created_at"))) {
         m.created = Some((v, line))
     }
@@ -373,6 +388,19 @@ fn update_session(m: &mut Meta, p: &Map<String, Value>, line: u64) {
     if m.parent.is_some() {
         m.subagent = true
     }
+}
+
+fn rollout_id_from_path(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let candidate = stem.get(stem.len().checked_sub(36)?..)?;
+    let valid = candidate.bytes().enumerate().all(|(index, byte)| {
+        if matches!(index, 8 | 13 | 18 | 23) {
+            byte == b'-'
+        } else {
+            byte.is_ascii_hexdigit()
+        }
+    });
+    valid.then(|| candidate.to_owned())
 }
 fn update_runtime(m: &mut Meta, p: &Map<String, Value>, line: u64) {
     assign_text(&mut m.model, p.get("model"), line);

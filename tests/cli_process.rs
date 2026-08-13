@@ -165,3 +165,51 @@ fn index_refresh_status_and_rebuild_use_discovered_rollouts() {
         .success()
         .stdout(predicate::str::contains("indexed: 1 conversations"));
 }
+
+#[test]
+fn index_refresh_keeps_distinct_rollout_identities_with_inherited_metadata() {
+    let home = TempDir::new().unwrap();
+    let first = home
+        .path()
+        .join("rollout-2026-08-13T00-00-00-019eece4-3a1b-7713-8f99-77d716fe2703.jsonl");
+    let second = home
+        .path()
+        .join("rollout-2026-08-13T00-00-01-019eece5-4a1b-7713-8f99-77d716fe2704.jsonl");
+    std::fs::write(
+        &first,
+        concat!(
+            r#"{"type":"session_meta","payload":{"id":"019eece4-3a1b-7713-8f99-77d716fe2703","cwd":"/first"}}"#,
+            "\n",
+            r#"{"type":"session_meta","payload":{"id":"019eecb6-8910-7603-b48a-998b04738e31"}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &second,
+        concat!(
+            r#"{"type":"session_meta","payload":{"id":"019eece5-4a1b-7713-8f99-77d716fe2704","cwd":"/second"}}"#,
+            "\n",
+            r#"{"type":"session_meta","payload":{"id":"019eecb6-8910-7603-b48a-998b04738e31"}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("codex-spawns")
+        .unwrap()
+        .args([
+            "index",
+            "refresh",
+            "--codex-home",
+            home.path().to_str().unwrap(),
+            "--file",
+            first.to_str().unwrap(),
+            "--file",
+            second.to_str().unwrap(),
+            "--no-state-db",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("indexed: 2 conversations"));
+}

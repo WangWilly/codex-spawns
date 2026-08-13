@@ -10,6 +10,101 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 #[test]
+fn rollout_identity_is_not_overwritten_by_inherited_session_metadata() {
+    let temp = tempdir().unwrap();
+    let rollout = temp
+        .path()
+        .join("rollout-2026-08-13T00-00-00-019eece4-3a1b-7713-8f99-77d716fe2703.jsonl");
+    fs::write(
+        &rollout,
+        concat!(
+            r#"{"type":"session_meta","payload":{"id":"019eece4-3a1b-7713-8f99-77d716fe2703","timestamp":"2026-08-13T00:00:00Z","cwd":"/current"}}"#,
+            "\n",
+            r#"{"type":"session_meta","payload":{"id":"019eecb6-8910-7603-b48a-998b04738e31","timestamp":"2026-08-12T00:00:00Z","cwd":"/inherited"}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let result = scan_sources(&[rollout], &[]).unwrap();
+    assert_eq!(result.root_conversations.len(), 1);
+    assert_eq!(
+        result.root_conversations[0].id,
+        "019eece4-3a1b-7713-8f99-77d716fe2703"
+    );
+    assert_eq!(
+        result.root_conversations[0].cwd.value.as_deref(),
+        Some("/current")
+    );
+}
+
+#[test]
+fn rollout_filename_supplies_identity_when_session_metadata_has_no_id() {
+    let temp = tempdir().unwrap();
+    let rollout = temp
+        .path()
+        .join("rollout-2026-08-13T00-00-00-019eece4-3a1b-7713-8f99-77d716fe2703.jsonl");
+    fs::write(
+        &rollout,
+        concat!(
+            r#"{"type":"session_meta","payload":{"timestamp":"2026-08-13T00:00:00Z","cwd":"/current"}}"#,
+            "\n",
+            r#"{"type":"session_meta","payload":{"id":"019eecb6-8910-7603-b48a-998b04738e31","timestamp":"2026-08-12T00:00:00Z"}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let result = scan_sources(&[rollout], &[]).unwrap();
+    assert_eq!(
+        result.root_conversations[0].id,
+        "019eece4-3a1b-7713-8f99-77d716fe2703"
+    );
+}
+
+#[test]
+fn repeated_matching_session_metadata_keeps_one_identity() {
+    let temp = tempdir().unwrap();
+    let rollout = temp.path().join("rollout.jsonl");
+    fs::write(
+        &rollout,
+        concat!(
+            r#"{"type":"session_meta","payload":{"id":"root-id","cwd":"/first"}}"#,
+            "\n",
+            r#"{"type":"session_meta","payload":{"id":"root-id","model":"gpt-current"}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let result = scan_sources(&[rollout], &[]).unwrap();
+    assert_eq!(result.root_conversations[0].id, "root-id");
+    assert_eq!(
+        result.root_conversations[0].model.value.as_deref(),
+        Some("gpt-current")
+    );
+}
+
+#[test]
+fn later_session_metadata_supplies_identity_when_filename_and_first_record_do_not() {
+    let temp = tempdir().unwrap();
+    let rollout = temp.path().join("rollout.jsonl");
+    fs::write(
+        &rollout,
+        concat!(
+            r#"{"type":"session_meta","payload":{"cwd":"/current"}}"#,
+            "\n",
+            r#"{"type":"session_meta","payload":{"id":"root-id"}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let result = scan_sources(&[rollout], &[]).unwrap();
+    assert_eq!(result.root_conversations[0].id, "root-id");
+}
+
+#[test]
 fn matches_child_metadata_to_unresolved_call_by_parent_and_task_name() {
     let temp = tempdir().unwrap();
     let parent = temp.path().join("parent.jsonl");
