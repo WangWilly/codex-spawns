@@ -27,6 +27,227 @@ fn conversation(id: &str, activity: &str) -> ConversationRecord {
     }
 }
 
+fn ids(page: BrowsePage) -> Vec<String> {
+    page.conversations
+        .into_iter()
+        .map(|record| record.id)
+        .collect()
+}
+
+#[test]
+fn browse_orders_the_entire_catalog_by_each_public_sort_field() {
+    let (_dir, mut index) = open();
+    let mut a = conversation("a", "2026-01-02");
+    a.title = "Zulu".into();
+    a.agent_count = 1;
+    a.max_depth = 3;
+    let mut b = conversation("b", "2026-01-01");
+    b.title = "Alpha".into();
+    b.agent_count = 4;
+    b.max_depth = 1;
+    b.archived = true;
+    b.profile_complete = false;
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![a, b],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    let cases = [
+        (SortField::Updated, vec!["b", "a"]),
+        (SortField::Title, vec!["b", "a"]),
+        (SortField::Agents, vec!["a", "b"]),
+        (SortField::Depth, vec!["b", "a"]),
+        (SortField::State, vec!["a", "b"]),
+        (SortField::Profile, vec!["a", "b"]),
+    ];
+    for (field, expected) in cases {
+        let page = index
+            .browse_ordered(
+                &ConversationFilter::default(),
+                None,
+                25,
+                BrowseOrder {
+                    field,
+                    direction: SortDirection::Asc,
+                },
+            )
+            .unwrap();
+        assert_eq!(ids(page), expected, "field {field:?}");
+        let page = index
+            .browse_ordered(
+                &ConversationFilter::default(),
+                None,
+                25,
+                BrowseOrder {
+                    field,
+                    direction: SortDirection::Desc,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            ids(page),
+            expected.into_iter().rev().collect::<Vec<_>>(),
+            "field {field:?} descending"
+        );
+    }
+}
+
+#[test]
+fn updated_unknown_is_bottom_in_both_directions_and_ids_break_ties() {
+    let (_dir, mut index) = open();
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![
+                    conversation("b", "2026-01-01"),
+                    conversation("a", "2026-01-01"),
+                    conversation("unknown", ""),
+                ],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    for direction in [SortDirection::Asc, SortDirection::Desc] {
+        let page = index
+            .browse_ordered(
+                &ConversationFilter::default(),
+                None,
+                25,
+                BrowseOrder {
+                    field: SortField::Updated,
+                    direction,
+                },
+            )
+            .unwrap();
+        assert_eq!(page.conversations.last().unwrap().id, "unknown");
+        assert_eq!(&ids(page)[..2], &["a", "b"]);
+    }
+}
+
+#[test]
+fn cursor_is_bound_to_order_and_snapshot() {
+    let (_dir, mut index) = open();
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![
+                    conversation("a", "1"),
+                    conversation("b", "2"),
+                    conversation("c", "3"),
+                ],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    let order = BrowseOrder {
+        field: SortField::Title,
+        direction: SortDirection::Asc,
+    };
+    let first = index
+        .browse_ordered(&ConversationFilter::default(), None, 2, order)
+        .unwrap();
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![conversation("new", "4")],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        ids(index
+            .browse_ordered(
+                &ConversationFilter::default(),
+                first.next_cursor.as_ref(),
+                2,
+                order
+            )
+            .unwrap()),
+        vec!["c"]
+    );
+    assert!(matches!(
+        index.browse_ordered(
+            &ConversationFilter::default(),
+            first.next_cursor.as_ref(),
+            2,
+            BrowseOrder::default()
+        ),
+        Err(IndexError::InvalidCursor)
+    ));
+}
+
+#[test]
+fn richer_state_and_profile_semantics_are_stored_without_conflation() {
+    let (_dir, mut index) = open();
+    index
+        .refresh(
+            RefreshBatch {
+                conversations: vec![conversation("root", "1")],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+    index
+        .update_semantics(&[ConversationSemantics {
+            id: "root".into(),
+            state: ConversationState::Missing,
+            profile: ProfileQuality::Conflicting,
+        }])
+        .unwrap();
+    let page = index
+        .browse(&ConversationFilter::default(), None, 25)
+        .unwrap();
+    assert_eq!(
+        page.semantics["root"],
+        (ConversationState::Missing, ProfileQuality::Conflicting)
+    );
+}
+
+#[test]
+fn projection_completion_is_transactional() {
+    let (_dir, mut index) = open();
+    assert!(index.projection_status().unwrap().needs_reprojection());
+    index
+        .complete_reprojection(
+            REQUIRED_PROJECTION_VERSION,
+            RefreshBatch {
+                conversations: vec![conversation("root", "1")],
+                ..Default::default()
+            },
+            &[],
+            |_| {},
+        )
+        .unwrap();
+    assert_eq!(
+        index.projection_status().unwrap().current,
+        REQUIRED_PROJECTION_VERSION
+    );
+    let result = index.complete_reprojection(
+        REQUIRED_PROJECTION_VERSION + 1,
+        RefreshBatch {
+            conversations: vec![conversation("rolled-back-projection", "2")],
+            reject_reason: Some("stop".into()),
+            ..Default::default()
+        },
+        &[],
+        |_| {},
+    );
+    assert!(result.is_err());
+    assert_eq!(
+        index.projection_status().unwrap().current,
+        REQUIRED_PROJECTION_VERSION
+    );
+    assert!(index.profile("rolled-back-projection").unwrap().is_none());
+}
+
 #[test]
 fn refresh_and_cursor_pagination_keep_a_stable_browse_snapshot() {
     let (_dir, mut index) = open();
