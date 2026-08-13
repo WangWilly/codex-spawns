@@ -1,0 +1,64 @@
+name: Build and package release target
+description: Build, verify, package, and upload one codex-spawns release target
+inputs:
+  target:
+    description: Rust target triple
+    required: true
+  build-command:
+    description: Cargo build command (cargo build or cargo zigbuild)
+    required: true
+  version:
+    description: Expected package version without a v prefix
+    required: true
+  artifact-retention-days:
+    description: Workflow artifact retention period
+    required: false
+    default: '7'
+runs:
+  using: composite
+  steps:
+    - name: Add Rust target
+      shell: bash
+      run: rustup target add "${{ inputs.target }}"
+    - name: Install pinned Zig toolchain
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        python3 -m pip install --user ziglang==0.13.0
+        zig_path=$(python3 -c 'import pathlib, ziglang; print(pathlib.Path(ziglang.__file__).parent / "zig")')
+        ln -s "$zig_path" "$HOME/.cargo/bin/zig"
+        zig version
+    - name: Install pinned cargo-zigbuild
+      if: runner.os == 'Linux'
+      shell: bash
+      run: cargo install cargo-zigbuild --version 0.20.1 --locked
+    - name: Build release binary
+      shell: bash
+      run: ${{ inputs.build-command }} --release --target "${{ inputs.target }}"
+    - name: Inspect binary format
+      shell: bash
+      run: file "target/${{ inputs.target }}/release/codex-spawns"
+    - name: Verify native binary version
+      if: runner.os == 'macOS' || inputs.target == 'x86_64-unknown-linux-musl'
+      shell: bash
+      env:
+        EXPECTED_VERSION: ${{ inputs.version }}
+      run: |
+        expected_version="codex-spawns $EXPECTED_VERSION"
+        actual_version=$("target/${{ inputs.target }}/release/codex-spawns" --version)
+        test "$actual_version" = "$expected_version" || {
+          echo "version mismatch: expected '$expected_version', got '$actual_version'" >&2
+          exit 1
+        }
+    - name: Package release archive
+      shell: bash
+      env:
+        GIT_COMMIT_SHA: ${{ github.sha }}
+      run: scripts/package-release.sh "${{ inputs.version }}" "${{ inputs.target }}" "target/${{ inputs.target }}/release/codex-spawns" dist
+    - name: Upload packaged target
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: codex-spawns-${{ inputs.target }}
+        path: dist/codex-spawns-${{ inputs.target }}.tar.gz
+        if-no-files-found: error
+        retention-days: ${{ inputs.artifact-retention-days }}

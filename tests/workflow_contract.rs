@@ -21,15 +21,17 @@ fn ci_has_least_privilege_checks_and_conditional_release_matrix() {
         "Cargo.toml",
         "Cargo.lock",
         "rust-toolchain.toml",
+        "LICENSE",
+        ".cargo/config.toml",
         "install.sh",
         "scripts/package-release.sh",
+        ".github/actions/**",
         ".github/workflows/**",
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",
         "aarch64-unknown-linux-musl",
         "x86_64-unknown-linux-musl",
-        "actions/upload-artifact@",
-        "retention-days: 7",
+        "uses: ./.github/actions/build-release",
     ] {
         assert!(ci.contains(required), "ci.yml is missing {required:?}");
     }
@@ -49,10 +51,10 @@ fn release_is_tag_gated_draft_and_publishes_complete_bundle() {
         "x86_64-apple-darwin",
         "aarch64-unknown-linux-musl",
         "x86_64-unknown-linux-musl",
-        "cargo-zigbuild --version 0.20.1 --locked",
         "build_command: cargo zigbuild",
-        "ziglang==0.13.0",
-        "scripts/package-release.sh",
+        "uses: ./.github/actions/build-release",
+        "scripts/render-installer.sh",
+        ".github/actions/build-release",
         "SHA256SUMS",
         "install.sh",
         "gh release create",
@@ -66,9 +68,49 @@ fn release_is_tag_gated_draft_and_publishes_complete_bundle() {
 }
 
 #[test]
+fn workflows_share_one_release_build_contract() {
+    let ci = workflow("ci.yml");
+    let release = workflow("release.yml");
+    let action = fs::read_to_string(".github/actions/build-release/action.yml")
+        .expect("shared release build action must exist");
+
+    assert!(ci.contains("uses: ./.github/actions/build-release"));
+    assert!(release.contains("uses: ./.github/actions/build-release"));
+    for required in [
+        "cargo-zigbuild --version 0.20.1 --locked",
+        "ziglang==0.13.0",
+        "scripts/package-release.sh",
+        "actual_version=$(",
+        "--version)",
+        "test \"$actual_version\" = \"$expected_version\"",
+        "expected_version",
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+    ] {
+        assert!(
+            action.contains(required),
+            "shared action is missing {required:?}"
+        );
+    }
+    assert!(!action.contains("permissions:"));
+}
+
+#[test]
+fn release_renders_a_tag_bound_installer() {
+    let release = workflow("release.yml");
+    assert!(release.contains("scripts/render-installer.sh"));
+    assert!(release.contains("github.ref_name"));
+    assert!(!release.contains("cp install.sh dist/install.sh"));
+}
+
+#[test]
 fn all_actions_are_pinned_to_full_commit_shas() {
-    for name in ["ci.yml", "release.yml"] {
-        for line in workflow(name).lines() {
+    for path in [
+        ".github/workflows/ci.yml",
+        ".github/workflows/release.yml",
+        ".github/actions/build-release/action.yml",
+    ] {
+        let source = fs::read_to_string(path).unwrap_or_else(|error| panic!("{path}: {error}"));
+        for line in source.lines() {
             let Some((_, reference)) = line
                 .trim()
                 .strip_prefix("uses: ")
@@ -77,10 +119,10 @@ fn all_actions_are_pinned_to_full_commit_shas() {
                 continue;
             };
             let sha = reference.split_whitespace().next().unwrap();
-            assert_eq!(sha.len(), 40, "{name} has an unpinned action: {line}");
+            assert_eq!(sha.len(), 40, "{path} has an unpinned action: {line}");
             assert!(
                 sha.chars().all(|ch| ch.is_ascii_hexdigit()),
-                "{name} has an unpinned action: {line}"
+                "{path} has an unpinned action: {line}"
             );
         }
     }

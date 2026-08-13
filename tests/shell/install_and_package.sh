@@ -111,6 +111,18 @@ assert_contains "$curl_log" 'https://github.com/example/fork/releases/download/v
 [ ! -s "$sudo_log" ] || fail "installer invoked sudo"
 [ "$(cat "$fake_home/.profile")" = 'profile sentinel' ] || fail "installer modified a shell profile"
 
+# A release-rendered installer defaults to its own tag without an environment override.
+bound_installer="$tmp_root/install-v0.3.0.sh"
+"$repo_root/scripts/render-installer.sh" v0.3.0 "$repo_root/install.sh" "$bound_installer"
+assert_contains "$bound_installer" "release_default_version='v0.3.0'"
+: >"$curl_log"
+PATH="$fake_bin" FAKE_UNAME_S=Linux FAKE_UNAME_M=x86_64 \
+  FAKE_RELEASE_DIR="$out" FAKE_CURL_LOG="$curl_log" \
+  CODEX_SPAWNS_REPOSITORY=example/fork \
+  CODEX_SPAWNS_INSTALL_DIR="$tmp_root/bound-install" \
+  /bin/sh "$bound_installer"
+assert_contains "$curl_log" 'https://github.com/example/fork/releases/download/v0.3.0/codex-spawns-x86_64-unknown-linux-musl.tar.gz'
+
 # macOS arm64 maps to the release target and latest uses the release-bound URL.
 : >"$curl_log"
 cp "$archive" "$out/codex-spawns-aarch64-apple-darwin.tar.gz"

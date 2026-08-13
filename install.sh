@@ -3,7 +3,10 @@ set -eu
 
 repository=${CODEX_SPAWNS_REPOSITORY:-WangWilly/codex-spawns}
 install_dir=${CODEX_SPAWNS_INSTALL_DIR:-"$HOME/.local/bin"}
-version=${CODEX_SPAWNS_VERSION:-}
+# Release automation replaces this exact assignment in the uploaded copy.
+# The tracked installer intentionally remains suitable for the latest URL.
+release_default_version=''
+version=${CODEX_SPAWNS_VERSION:-$release_default_version}
 
 case "$repository" in
   */*) ;;
