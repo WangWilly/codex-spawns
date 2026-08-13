@@ -88,6 +88,9 @@ pub struct RootConversation {
     pub cwd: ProfileFact<String>,
     pub model: ProfileFact<String>,
     pub effort: ProfileFact<String>,
+    pub title: ProfileFact<String>,
+    pub first_user_message: ProfileFact<String>,
+    pub last_event_at: ProfileFact<String>,
     pub event_count: u64,
     pub parse_errors: u64,
 }
@@ -105,6 +108,7 @@ pub struct AgentSession {
     pub model: ProfileFact<String>,
     pub effort: ProfileFact<String>,
     pub multi_agent_version: ProfileFact<String>,
+    pub last_event_at: ProfileFact<String>,
     pub event_count: u64,
     pub parse_errors: u64,
 }

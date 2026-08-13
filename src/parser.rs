@@ -36,6 +36,9 @@ struct Meta {
     model: Option<(String, u64)>,
     effort: Option<(String, u64)>,
     version: Option<(String, u64)>,
+    title: Option<(String, u64)>,
+    first_user_message: Option<(String, u64)>,
+    last_event_at: Option<(String, u64)>,
     subagent: bool,
     events: u64,
     errors: u64,
@@ -89,6 +92,9 @@ pub fn parse_rollout(path: impl AsRef<Path>) -> Result<ParsedRollout, ParseError
             continue;
         };
         meta.events += 1;
+        if let Some(timestamp) = text(event_obj.get("timestamp")) {
+            meta.last_event_at = Some((timestamp, line));
+        }
         let payload = event_obj
             .get("payload")
             .and_then(Value::as_object)
@@ -98,6 +104,14 @@ pub fn parse_rollout(path: impl AsRef<Path>) -> Result<ParsedRollout, ParseError
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or(top_kind);
+        if meta.first_user_message.is_none()
+            && (payload.get("role").and_then(Value::as_str) == Some("user")
+                || kind == "user_message")
+        {
+            if let Some(message) = text(payload.get("content").or_else(|| payload.get("message"))) {
+                meta.first_user_message = Some((message, line));
+            }
+        }
         if top_kind == "session_meta" {
             update_session(&mut meta, payload, line);
         }
@@ -184,6 +198,7 @@ pub fn parse_rollout(path: impl AsRef<Path>) -> Result<ParsedRollout, ParseError
             model: fact(meta.model, path),
             effort: fact(meta.effort, path),
             multi_agent_version: fact(meta.version, path),
+            last_event_at: fact(meta.last_event_at, path),
             event_count: meta.events,
             parse_errors: meta.errors,
         };
@@ -200,6 +215,9 @@ pub fn parse_rollout(path: impl AsRef<Path>) -> Result<ParsedRollout, ParseError
             cwd: fact(meta.cwd, path),
             model: fact(meta.model, path),
             effort: fact(meta.effort, path),
+            title: fact(meta.title, path),
+            first_user_message: fact(meta.first_user_message, path),
+            last_event_at: fact(meta.last_event_at, path),
             event_count: meta.events,
             parse_errors: meta.errors,
         };
@@ -303,6 +321,7 @@ fn update_session(m: &mut Meta, p: &Map<String, Value>, line: u64) {
         m.cwd = Some((v, line))
     }
     assign_text(&mut m.model, p.get("model"), line);
+    assign_text(&mut m.title, p.get("title"), line);
     assign_text(
         &mut m.effort,
         p.get("effort")

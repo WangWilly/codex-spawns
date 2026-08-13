@@ -62,6 +62,8 @@ pub struct Common {
     pub reverse: bool,
     #[arg(long, global = true)]
     pub no_cache: bool,
+    #[arg(long, global = true)]
+    pub index_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]

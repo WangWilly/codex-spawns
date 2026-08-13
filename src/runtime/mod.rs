@@ -34,6 +34,9 @@ enum WorkerEvent {
 }
 
 fn index_path(common: &Common) -> PathBuf {
+    if let Some(path) = &common.index_path {
+        return path.clone();
+    }
     common
         .codex_home
         .clone()
@@ -47,11 +50,35 @@ fn index_path(common: &Common) -> PathBuf {
         .join("cache/codex-spawns/index.sqlite")
 }
 
+fn ephemeral_index_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "codex-spawns-no-cache-{}.sqlite",
+        std::process::id()
+    ))
+}
+
+fn selected_index_path(common: &Common) -> PathBuf {
+    if common.no_cache {
+        ephemeral_index_path()
+    } else {
+        index_path(common)
+    }
+}
+
+fn cleanup_ephemeral_index(common: &Common, path: &Path) {
+    if common.no_cache {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+}
+
 pub fn run_tui(common: &Common) -> Result<(), String> {
     if !io::stdout().is_terminal() {
         return Err("interactive mode requires a TTY".into());
     }
-    let path = index_path(common);
+    let path = selected_index_path(common);
+    cleanup_ephemeral_index(common, &path);
     let index =
         ProfileIndex::open(IndexOptions { path: path.clone() }).map_err(|e| e.to_string())?;
     let page = index
@@ -77,7 +104,11 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
             if let Some(input) = map_event(event::read().map_err(|e| e.to_string())?) {
                 for command in app.update(input) {
                     match command {
-                        Command::Quit => return Ok(()),
+                        Command::Quit => {
+                            drop(index);
+                            cleanup_ephemeral_index(common, &path);
+                            return Ok(());
+                        }
                         Command::LoadMore { cursor } => {
                             let cursor = codex_spawns::index::BrowseCursor::decode(&cursor)
                                 .map_err(|e| e.to_string())?;
@@ -390,7 +421,8 @@ impl Drop for TerminalGuard {
 }
 
 pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
-    let path = index_path(common);
+    let path = selected_index_path(common);
+    cleanup_ephemeral_index(common, &path);
     match action {
         IndexAction::Status => {
             let index = ProfileIndex::open(IndexOptions { path: path.clone() })
@@ -407,7 +439,8 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
             let (files, dbs) = crate::cli::discover(common)?;
             let scan = codex_spawns::scan_sources(&files, &dbs).map_err(|e| e.to_string())?;
             let batch = refresh_batch(&scan, &files, &dbs)?;
-            let mut index = ProfileIndex::open(IndexOptions { path }).map_err(|e| e.to_string())?;
+            let mut index = ProfileIndex::open(IndexOptions { path: path.clone() })
+                .map_err(|e| e.to_string())?;
             if rebuild {
                 index.reset().map_err(|e| e.to_string())?;
             }
@@ -419,13 +452,15 @@ pub fn run_index(action: IndexAction, common: &Common) -> Result<(), String> {
             );
         }
         IndexAction::Prune { before } => {
-            let mut index = ProfileIndex::open(IndexOptions { path }).map_err(|e| e.to_string())?;
+            let mut index = ProfileIndex::open(IndexOptions { path: path.clone() })
+                .map_err(|e| e.to_string())?;
             println!(
                 "pruned: {}",
                 index.prune_missing(before).map_err(|e| e.to_string())?
             );
         }
     }
+    cleanup_ephemeral_index(common, &path);
     Ok(())
 }
 
@@ -489,11 +524,18 @@ pub(crate) fn refresh_batch(
             .unwrap_or(0);
         roots.push(ConversationRecord {
             id: root.id.clone(),
-            title: fallback_title(&cwd, &created, &root.id),
-            title_source: "derived".into(),
+            title: conversation_title(root, &cwd, &created),
+            title_source: if root.title.value.is_some() {
+                "official"
+            } else if root.first_user_message.value.is_some() {
+                "first-user-message"
+            } else {
+                "derived"
+            }
+            .into(),
             cwd,
             created_at: created.clone(),
-            last_activity_at: created,
+            last_activity_at: root.last_event_at.value.clone().unwrap_or(created),
             archived: is_archived(&root.path),
             model: root.model.value.clone(),
             status: None,
@@ -605,6 +647,23 @@ fn fallback_title(cwd: &str, created: &str, id: &str) -> String {
         _ => id.chars().take(12).collect(),
     }
 }
+fn conversation_title(root: &codex_spawns::RootConversation, cwd: &str, created: &str) -> String {
+    root.title
+        .value
+        .clone()
+        .or_else(|| {
+            root.first_user_message.value.as_deref().map(|message| {
+                let one_line = message.split_whitespace().collect::<Vec<_>>().join(" ");
+                if one_line.chars().count() > 80 {
+                    format!("{}…", one_line.chars().take(79).collect::<String>())
+                } else {
+                    one_line
+                }
+            })
+        })
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| fallback_title(cwd, created, &root.id))
+}
 fn excerpt(value: Option<&str>) -> Option<String> {
     value.map(|s| {
         if s.chars().count() > 120 {
@@ -660,4 +719,57 @@ fn source_record(path: &Path, archived: bool) -> Result<SourceRecord, String> {
         safe_offset: metadata.len(),
         archived,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_spawns::{FactConfidence, ProfileFact};
+
+    fn root() -> codex_spawns::RootConversation {
+        codex_spawns::RootConversation {
+            id: "root-id-long".into(),
+            path: "/tmp/root.jsonl".into(),
+            created_at: ProfileFact::unknown(),
+            cwd: ProfileFact::unknown(),
+            model: ProfileFact::unknown(),
+            effort: ProfileFact::unknown(),
+            title: ProfileFact::unknown(),
+            first_user_message: ProfileFact::unknown(),
+            last_event_at: ProfileFact::unknown(),
+            event_count: 0,
+            parse_errors: 0,
+        }
+    }
+
+    #[test]
+    fn conversation_title_uses_the_confirmed_priority_order() {
+        let mut item = root();
+        assert_eq!(
+            conversation_title(&item, "/work/project", "2026-01-01"),
+            "project · 2026-01-01"
+        );
+        item.first_user_message.value = Some("  Explain   this conversation  ".into());
+        item.first_user_message.confidence = FactConfidence::Observed;
+        assert_eq!(
+            conversation_title(&item, "/work/project", "2026-01-01"),
+            "Explain this conversation"
+        );
+        item.title.value = Some("Official".into());
+        item.title.confidence = FactConfidence::Observed;
+        assert_eq!(
+            conversation_title(&item, "/work/project", "2026-01-01"),
+            "Official"
+        );
+    }
+
+    #[test]
+    fn explicit_index_path_wins_over_codex_home() {
+        let common = Common {
+            index_path: Some("/tmp/custom.sqlite".into()),
+            codex_home: Some("/other".into()),
+            ..Default::default()
+        };
+        assert_eq!(index_path(&common), PathBuf::from("/tmp/custom.sqlite"));
+    }
 }
