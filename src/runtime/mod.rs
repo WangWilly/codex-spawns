@@ -94,6 +94,13 @@ fn save_preferences(common: &Common, preferences: &Preferences) -> Result<(), St
     fs::write(path, preferences.to_toml_like()).map_err(|error| error.to_string())
 }
 
+/// Apply the terminal's current dimensions before the first frame is drawn.
+/// Crossterm only emits resize events after a size change, so a fresh TUI
+/// session needs this explicit initial event to seed all screen viewports.
+fn initialize_terminal_viewport(app: &mut App, width: u16, height: u16) {
+    app.update(Event::Resize { width, height });
+}
+
 fn cleanup_ephemeral_index(common: &Common, path: &Path) {
     if common.no_cache {
         for suffix in ["", "-wal", "-shm"] {
@@ -131,6 +138,8 @@ pub fn run_tui(common: &Common) -> Result<(), String> {
         app.preferences().page_size,
     ));
     let mut terminal = TerminalGuard::enter().map_err(|e| e.to_string())?;
+    let size = terminal.terminal.size().map_err(|e| e.to_string())?;
+    initialize_terminal_viewport(&mut app, size.width, size.height);
     let mut clicks = ClickTracker::default();
     loop {
         if let Some(receiver) = refresh.as_ref() {
@@ -1531,6 +1540,17 @@ mod tests {
             ),
             Some(Event::MouseSelect { index: 1 })
         );
+    }
+
+    #[test]
+    fn initial_terminal_viewport_is_seeded_before_first_frame() {
+        let mut app = App::new(Preferences::default());
+        assert_eq!(app.conversation_viewport().height, 0);
+        initialize_terminal_viewport(&mut app, 163, 39);
+        assert_eq!(app.conversation_viewport().height, 27);
+        assert_eq!(app.tree_viewport().height, 30);
+        assert_eq!(app.detail_viewport().height, 31);
+        assert_eq!(app.help_viewport().height, 31);
     }
 
     #[test]

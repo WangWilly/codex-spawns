@@ -101,6 +101,110 @@ fn narrow_table_keeps_title_frozen_and_cues_horizontal_overflow() {
 }
 
 #[test]
+fn resized_root_table_status_uses_rendered_body_capacity() {
+    let mut app = App::new(Preferences {
+        color: false,
+        ..Preferences::default()
+    });
+    app.update(Event::ConversationsLoaded(Page {
+        items: (0..40)
+            .map(|index| ConversationItem {
+                id: index.to_string(),
+                title: format!("Conversation {index}"),
+                cwd: "/repo".into(),
+                last_activity_at: "now".into(),
+                archived: false,
+                agent_count: 0,
+                max_depth: 0,
+                profile_complete: true,
+                title_source: "fixture".into(),
+                state: "active".into(),
+                profile: "complete".into(),
+                project: ProjectDisplay::Unknown,
+                tokens: TokenDisplay::Unknown,
+                model: None,
+            })
+            .collect(),
+        next_cursor: None,
+        approximate_total: Some(40),
+    }));
+    app.update(Event::Resize {
+        width: 163,
+        height: 39,
+    });
+    let backend = TestBackend::new(163, 39);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let output = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(output.contains("Rows 1–27 of ~40"), "status was: {output}");
+}
+
+#[test]
+fn focused_column_is_visible_in_header_and_rows_after_horizontal_move() {
+    let mut app = App::new(Preferences {
+        color: false,
+        ..Preferences::default()
+    });
+    app.update(Event::ConversationsLoaded(Page {
+        items: vec![ConversationItem {
+            id: "root".into(),
+            title: "Root".into(),
+            cwd: "/repo".into(),
+            last_activity_at: "now".into(),
+            archived: false,
+            agent_count: 1,
+            max_depth: 1,
+            profile_complete: true,
+            title_source: "fixture".into(),
+            state: "active".into(),
+            profile: "complete".into(),
+            project: ProjectDisplay::Assigned {
+                id: "p1".into(),
+                name: "Project".into(),
+            },
+            tokens: TokenDisplay::Exact(1),
+            model: None,
+        }],
+        next_cursor: None,
+        approximate_total: Some(1),
+    }));
+    app.update(Event::SetViewport {
+        width: 75,
+        height: 4,
+    });
+    let before_backend = TestBackend::new(75, 18);
+    let mut before_terminal = Terminal::new(before_backend).unwrap();
+    before_terminal.draw(|frame| render(frame, &app)).unwrap();
+    let before = before_terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+
+    app.update(Event::ScrollRight);
+    let after_backend = TestBackend::new(75, 18);
+    let mut after_terminal = Terminal::new(after_backend).unwrap();
+    after_terminal.draw(|frame| render(frame, &app)).unwrap();
+    let after = after_terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert_ne!(before, after);
+    assert!(after.contains('▸'), "focused marker missing: {after}");
+}
+
+#[test]
 fn cjk_title_uses_terminal_cell_width_without_shifting_headers() {
     let mut app = App::new(Preferences {
         color: false,

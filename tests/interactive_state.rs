@@ -562,6 +562,52 @@ fn horizontal_cursor_reveals_one_complete_column_at_table_edges() {
 }
 
 #[test]
+fn entering_agents_after_resize_initializes_the_tree_capacity() {
+    let mut app = App::new(Preferences::default());
+    app.update(Event::ConversationsLoaded(Page {
+        items: vec![conversation("root", "Root")],
+        next_cursor: None,
+        approximate_total: None,
+    }));
+    app.update(Event::Resize {
+        width: 163,
+        height: 39,
+    });
+    app.update(Event::Enter);
+    app.update(Event::AgentsLoaded {
+        conversation_id: "root".into(),
+        agents: (0..7)
+            .map(|index| {
+                agent(
+                    &format!("agent-{index}"),
+                    Some("root"),
+                    1,
+                    AgentStatus::Complete,
+                )
+            })
+            .collect(),
+    });
+    for _ in 0..7 {
+        app.update(Event::Down);
+    }
+    assert_eq!(app.selected_agent_index(), 7);
+    assert_eq!(app.tree_viewport().row, 0);
+}
+
+#[test]
+fn resize_matches_detail_and_help_render_capacities() {
+    let mut app = App::new(Preferences::default());
+    app.update(Event::Resize {
+        width: 163,
+        height: 39,
+    });
+    assert_eq!(app.conversation_viewport().height, 27);
+    assert_eq!(app.tree_viewport().height, 30);
+    assert_eq!(app.detail_viewport().height, 31);
+    assert_eq!(app.help_viewport().height, 31);
+}
+
+#[test]
 fn project_filter_cycles_known_projects_and_search_matches_project_name() {
     let mut alpha = conversation("alpha", "Alpha");
     alpha.project = ProjectDisplay::Assigned {

@@ -17,9 +17,9 @@ fn fixture_adapter_reads_titles_tokens_and_current_project_states() {
         [],
     )
     .unwrap();
-    conn.execute("INSERT INTO threads VALUES ('assigned', '**App** [title](https://x)', 12), ('none', NULL, 0), ('unknown', NULL, NULL)", []).unwrap();
+    conn.execute("INSERT INTO threads VALUES ('assigned', '**App** [title](https://x)', 12), ('legacy', NULL, 0), ('none', NULL, 0), ('unknown', NULL, NULL)", []).unwrap();
     drop(conn);
-    fs::write(&json, r#"{"local-projects":{"p1":{"name":"Project **One**"}},"thread-project-assignments":{"assigned":"p1"},"projectless-thread-ids":["none"]}"#).unwrap();
+    fs::write(&json, r#"{"local-projects":{"p1":{"name":"Project **One**"}},"thread-project-assignments":{"assigned":{"projectKind":"local","projectId":"p1","cwd":"/repo","pendingCoreUpdate":false},"legacy":"p1"},"projectless-thread-ids":["none"]}"#).unwrap();
     let snapshot = load_app_metadata(&AppMetadataPaths::new(&db, &json)).unwrap();
     assert_eq!(
         snapshot.threads["assigned"].title.as_deref(),
@@ -29,6 +29,13 @@ fn fixture_adapter_reads_titles_tokens_and_current_project_states() {
     assert_eq!(snapshot.threads["unknown"].tokens_used, None);
     assert_eq!(
         snapshot.projects["assigned"],
+        ProjectAssignment::Assigned {
+            id: "p1".into(),
+            name: "Project One".into()
+        }
+    );
+    assert_eq!(
+        snapshot.projects["legacy"],
         ProjectAssignment::Assigned {
             id: "p1".into(),
             name: "Project One".into()

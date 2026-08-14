@@ -224,7 +224,7 @@ fn index_refresh_reads_app_metadata_only_from_the_injected_codex_home() {
     let catalog = home.path().join("state_5.sqlite");
     let connection = rusqlite::Connection::open(&catalog).unwrap();
     connection.execute_batch("CREATE TABLE threads(id TEXT PRIMARY KEY,title TEXT,tokens_used INTEGER); INSERT INTO threads VALUES('01900000-0000-7000-8000-000000000001','**App Atlas title**',1234);").unwrap();
-    std::fs::write(home.path().join(".codex-global-state.json"), r#"{"local-projects":{"project-1":{"name":"Atlas"}},"thread-project-assignments":{"01900000-0000-7000-8000-000000000001":"project-1"},"projectless-thread-ids":[]}"#).unwrap();
+    std::fs::write(home.path().join(".codex-global-state.json"), r#"{"local-projects":{"project-1":{"name":"Atlas"}},"thread-project-assignments":{"01900000-0000-7000-8000-000000000001":{"projectKind":"local","projectId":"project-1","cwd":"/repo","pendingCoreUpdate":false}},"projectless-thread-ids":[]}"#).unwrap();
 
     Command::cargo_bin("codex-spawns")
         .unwrap()

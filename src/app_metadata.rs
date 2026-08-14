@@ -91,16 +91,22 @@ pub fn load_app_metadata(
         .and_then(Value::as_object)
     {
         for (thread, project) in assignments {
-            if let Some(id) = project.as_str() {
-                if let Some(name) = names.get(id) {
-                    projects.insert(
-                        thread.clone(),
-                        ProjectAssignment::Assigned {
-                            id: id.into(),
-                            name: name.clone(),
-                        },
-                    );
-                }
+            // Older global-state snapshots stored the project id directly as
+            // a string. Current App snapshots store an assignment object with
+            // the id in `projectId`; accept both representations so stale or
+            // missing catalog entries still fall through to Unknown.
+            let id = project
+                .as_str()
+                .or_else(|| project.get("projectId").and_then(Value::as_str));
+            if let Some(id) = id.and_then(|id| names.get(id).map(|_| id)) {
+                let name = &names[id];
+                projects.insert(
+                    thread.clone(),
+                    ProjectAssignment::Assigned {
+                        id: id.into(),
+                        name: name.clone(),
+                    },
+                );
             }
         }
     }

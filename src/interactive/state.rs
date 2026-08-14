@@ -568,7 +568,35 @@ impl App {
             }
             Event::Resize { width, height } => {
                 self.width = width;
-                self.set_active_viewport(width as usize, height.saturating_sub(7) as usize);
+                // The terminal frame reserves three rows for the profile
+                // breadcrumb, three for status, and the root table reserves
+                // three more for its preview pane. Keep the logical viewport
+                // in sync with those rendered rows instead of the old
+                // terminal-height-minus-seven approximation.
+                self.conversation_viewport.width = width as usize;
+                self.conversation_viewport.height = height.saturating_sub(12).max(1) as usize;
+                self.tree_viewport.width = width as usize;
+                self.tree_viewport.height = height.saturating_sub(9).max(1) as usize;
+                self.detail_viewport.width = width as usize;
+                self.detail_viewport.height = height.saturating_sub(8).max(1) as usize;
+                self.help_viewport.width = width as usize;
+                self.help_viewport.height = height.saturating_sub(8).max(1) as usize;
+                match self.screen {
+                    Screen::Conversations => {
+                        Self::follow_selection(
+                            self.conversation_selection,
+                            &mut self.conversation_viewport,
+                        );
+                        self.clamp_conversation_columns();
+                    }
+                    Screen::Conversation => {
+                        Self::follow_selection(self.agent_selection, &mut self.tree_viewport);
+                        if self.focus == Focus::Tree {
+                            self.clamp_agent_columns();
+                        }
+                    }
+                    _ => {}
+                }
             }
             Event::SetViewport { width, height } => self.set_active_viewport(width, height),
             Event::RefreshProgress(progress) => self.refresh_progress = Some(progress),
@@ -810,6 +838,16 @@ impl App {
                     self.push_navigation();
                     self.selected_root_id = Some(item.id.clone());
                     self.agents.clear();
+                    // A resize can arrive while the root table is active, so
+                    // the agent table has not necessarily received its own
+                    // viewport update yet. Its table omits the root preview,
+                    // giving it three additional body rows.
+                    if self.conversation_viewport.width > 0 {
+                        self.tree_viewport.width = self.conversation_viewport.width;
+                        self.tree_viewport.height =
+                            self.conversation_viewport.height.saturating_add(3).max(1);
+                        self.clamp_agent_columns();
+                    }
                     self.screen = Screen::Conversation;
                     vec![Command::LoadAgents {
                         conversation_id: item.id,

@@ -78,6 +78,8 @@ fn render_conversations(frame: &mut Frame<'_>, app: &App, area: Rect) {
         &headers[1..].join(" | "),
         viewport.column,
         area.width as usize,
+        &columns[1..],
+        viewport.cursor_column,
     ))];
     for (index, item) in visible[start..end].iter().enumerate() {
         let absolute = start + index;
@@ -93,7 +95,15 @@ fn render_conversations(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .collect::<Vec<_>>()
             .join(" | ");
         lines.push(styled(
-            table_line(marker, &title, &rest, viewport.column, area.width as usize),
+            table_line(
+                marker,
+                &title,
+                &rest,
+                viewport.column,
+                area.width as usize,
+                &columns[1..],
+                viewport.cursor_column,
+            ),
             absolute == app.selected_conversation_index(),
             app.preferences().color,
         ));
@@ -188,6 +198,8 @@ fn render_tree(frame: &mut Frame<'_>, app: &App, area: Rect) {
         &headers[1..].join(" | "),
         viewport.column,
         area.width as usize,
+        &columns[1..],
+        viewport.cursor_column,
     ))];
     for (index, agent) in app
         .visible_agents()
@@ -209,7 +221,15 @@ fn render_tree(frame: &mut Frame<'_>, app: &App, area: Rect) {
             " "
         };
         lines.push(styled(
-            table_line(marker, &title, &rest, viewport.column, area.width as usize),
+            table_line(
+                marker,
+                &title,
+                &rest,
+                viewport.column,
+                area.width as usize,
+                &columns[1..],
+                viewport.cursor_column,
+            ),
             index == app.selected_agent_index(),
             app.preferences().color,
         ));
@@ -473,15 +493,82 @@ fn horizontal_slice(value: &str, offset: usize, width: usize) -> String {
     }
     result
 }
-fn table_line(marker: &str, title: &str, rest: &str, offset: usize, width: usize) -> String {
+fn table_line(
+    marker: &str,
+    title: &str,
+    rest: &str,
+    offset: usize,
+    width: usize,
+    columns: &[super::ColumnDescriptor],
+    cursor_column: usize,
+) -> String {
     let frozen = format!("{marker} {title} ");
     let available = width.saturating_sub(UnicodeWidthStr::width(frozen.as_str()) + 2);
     let left = if offset > 0 { "◀" } else { " " };
     let mut moving = horizontal_slice(rest, offset, available.saturating_sub(2));
+    mark_focused_column(&mut moving, rest, offset, columns, cursor_column);
     if UnicodeWidthStr::width(rest) > offset + UnicodeWidthStr::width(moving.as_str()) {
         moving.push('▶');
     }
     format!("{frozen}{left}{moving}")
+}
+
+fn mark_focused_column(
+    moving: &mut String,
+    rest: &str,
+    offset: usize,
+    columns: &[super::ColumnDescriptor],
+    cursor_column: usize,
+) {
+    let Some(column) = columns.get(cursor_column) else {
+        return;
+    };
+    let start = columns
+        .iter()
+        .take(cursor_column)
+        .map(|column| column.width + 3)
+        .sum::<usize>();
+    let end = start + column.width;
+    let moving_width = UnicodeWidthStr::width(moving.as_str());
+    let rest_width = UnicodeWidthStr::width(rest);
+    if moving_width == 0
+        || start >= offset.saturating_add(moving_width)
+        || end <= offset
+        || offset >= rest_width
+    {
+        return;
+    }
+    // Prefer a separator next to the focused cell so the marker does not
+    // replace any part of the header/value. If the separator is outside the
+    // horizontal slice (for example at the right edge), fall back to the
+    // other separator and finally the first cell of the focused value.
+    let target = [end, start.saturating_sub(1), start]
+        .into_iter()
+        .find_map(|position| {
+            (position >= offset)
+                .then_some(position - offset)
+                .filter(|position| *position < moving_width)
+        })
+        .unwrap_or(moving_width);
+    let mut cells = 0;
+    let mut marked = false;
+    let mut result = String::with_capacity(moving.len());
+    for ch in moving.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if !marked && cells <= target && target < cells.saturating_add(width) {
+            // Table cells are padded to one-cell ASCII boundaries. Replacing
+            // the first visible cell keeps the line width stable while making
+            // the focused column unambiguous at every horizontal offset.
+            result.push('▸');
+            marked = true;
+        } else {
+            result.push(ch);
+        }
+        cells += width;
+    }
+    if marked {
+        *moving = result;
+    }
 }
 fn wrap_display(value: &str, width: usize) -> Vec<String> {
     if width == 0 {
